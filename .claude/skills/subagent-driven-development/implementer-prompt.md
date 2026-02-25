@@ -56,6 +56,15 @@ Task tool (subagent_type: <project-specific agent>):
 
     **Ask them now.** Raise any concerns before starting work.
 
+    ## Research Tools
+
+    Before implementing, use available tools to understand existing patterns:
+    - **Context7:** Framework/library API docs — check before making assumptions about APIs
+    - **Serena:** Code structure — understand class hierarchies and method relationships before adding new code
+    - **Grep/Glob:** Text search and file discovery
+
+    If a tool is unavailable (call fails), fall back to manual exploration. Do not block on missing tools.
+
     ## Your Job
 
     Once you're clear on requirements:

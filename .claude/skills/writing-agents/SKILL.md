@@ -52,6 +52,12 @@ Before writing the agent, gather domain knowledge and project context:
 
 ### Step 1: Research Domain Best Practices
 
+**Check Context7 first** for framework-specific best practices:
+1. `context7.resolve_library_id` for the project's framework
+2. `context7.get_library_docs` for best practices, anti-patterns, common mistakes
+
+Fall back to WebSearch for general patterns, recent developments, or topics Context7 doesn't cover.
+
 **Use WebSearch to find domain-specific guidance.** Search for:
 - Best practices for [domain] development
 - Common [domain] mistakes/anti-patterns

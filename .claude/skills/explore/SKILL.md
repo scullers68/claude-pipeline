@@ -26,11 +26,18 @@ Refine the vague input into concrete requirements:
 
 ### Step 2: Research the Codebase
 
-Explore relevant files, patterns, and dependencies:
-- Use available code exploration tools (Serena, Grep, Glob, etc.) for code exploration
-- Use Context7 for framework/library documentation when available
+**Framework/library documentation (use Context7 first):**
+- `context7.resolve_library_id` → `context7.get_library_docs` for framework API docs
+- Fall back to web search only if Context7 doesn't have the library or is unavailable
+- See `mcp-tools` skill for full decision matrix
+
+**Code structure and patterns (use Serena for structural queries):**
+- Use Serena for class hierarchies, method signatures, call graphs
+- Use Grep/Glob for text-based file search and discovery
+
+**Document findings:**
 - Identify affected files, services, components
-- Document current behavior vs desired behavior
+- Document current behaviour vs desired behaviour
 - Note architectural patterns to follow
 
 **Context Checkpoint (Optional):** If the research phase read many files or generated extensive tool output, consider writing a concise research summary to a temp file and suggesting `/clear` before evaluation. The evaluation and planning phases only need the summary, not the raw exploration context. Use `/create-session-summary` if checkpointing.
