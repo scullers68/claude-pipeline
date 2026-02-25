@@ -32,28 +32,28 @@ if [[ "$tool_name" != 'Bash' ]]; then
     exit 0
 fi
 
-# Only process gh pr create commands
-if [[ "$command" != *'gh pr create'* ]]; then
+# Only process PR/MR creation commands
+if [[ "$command" != *'create-mr.sh'* ]] && [[ "$command" != *'gh pr create'* ]] && [[ "$command" != *'glab mr create'* ]]; then
     exit 0
 fi
 
 # Debug: log extracted values
 printf 'tool_name=%s command=%s stdout=%s\n' "$tool_name" "$command" "$stdout" >> "$debug_log"
 
-# Check if the PR was created successfully (look for PR URL in output)
-if [[ "$stdout" != *'github.com'* ]]; then
-    printf 'No github.com URL found in response, exiting\n' >> "$debug_log"
+# Check if the PR/MR was created successfully (look for URL in output)
+if [[ "$stdout" != *'github.com'* ]] && [[ "$stdout" != *'gitlab.com'* ]] && [[ "$stdout" != *'merge_request'* ]]; then
+    printf 'No PR/MR URL found in response, exiting\n' >> "$debug_log"
     exit 0
 fi
 
-printf 'PR URL found, triggering simplifier\n' >> "$debug_log"
+printf 'PR/MR URL found, triggering simplifier\n' >> "$debug_log"
 
-# Get the list of changed PHP files for context
-changed_files=$(git diff --name-only main...HEAD 2>/dev/null | grep '\.php$' | head -20 | tr '\n' ',')
+# Get the list of changed files for context
+changed_files=$(git diff --name-only main...HEAD 2>/dev/null | head -20 | tr '\n' ',')
 changed_files=${changed_files%,}
 
 # Build the reason message
-reason="PR created successfully. Now run the code-simplifier agent to review and simplify the PHP code in this PR. Changed PHP files: ${changed_files}. Use the Task tool with subagent_type='code-simplifier' to simplify the PR's changed code. After simplification, commit any changes and push to update the PR."
+reason="PR/MR created successfully. Now run the code-simplifier agent to review and simplify the code in this PR/MR. Changed files: ${changed_files}. Use the Task tool with subagent_type='code-simplifier' to simplify the changed code. After simplification, commit any changes and push to update the PR/MR."
 
 # Output JSON to prompt Claude to run the simplifier
 printf '%s\n' "$reason" | jq -Rs '{decision: "block", reason: .}'

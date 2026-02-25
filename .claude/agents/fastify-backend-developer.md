@@ -1,3 +1,4 @@
+<!-- STACK-SPECIFIC: Replace or delete during /adapting-claude-pipeline. This is an example agent for a TypeScript/Fastify backend. -->
 ---
 name: fastify-backend-developer
 model: sonnet

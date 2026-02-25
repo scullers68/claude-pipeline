@@ -1,3 +1,4 @@
+<!-- STACK-SPECIFIC: Replace during /adapting-claude-pipeline with your project's technology-specific review checks. -->
 # Technology-Specific Review Checklist
 
 Apply these checks when reviewing code changes. Only check items relevant to the files modified.

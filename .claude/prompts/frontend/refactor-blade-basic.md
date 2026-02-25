@@ -1,3 +1,4 @@
+<!-- STACK-SPECIFIC: Replace or delete during /adapting-claude-pipeline. This is an example prompt for Laravel Blade templates. -->
 # Refactor Blade (Basic)
 
 Refactor the referenced blade file following the patterns in `docs/STYLEGUIDE.md`.

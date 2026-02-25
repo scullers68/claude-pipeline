@@ -1,3 +1,4 @@
+<!-- STACK-SPECIFIC: Replace with language-specific doc skill or delete during /adapting-claude-pipeline. This is an example skill for PHP docblocks. -->
 ---
 name: write-docblocks
 description: Use when documentation coverage is low, after composer docs:coverage shows gaps, or when asked to batch-write PHPDoc blocks across multiple files

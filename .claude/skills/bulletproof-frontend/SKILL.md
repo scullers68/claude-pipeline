@@ -1,3 +1,4 @@
+<!-- STACK-SPECIFIC: Keep if web project with CSS focus; delete during /adapting-claude-pipeline otherwise. -->
 ---
 name: bulletproof-frontend
 description: Bulletproof CSS and frontend design principles from "Handcrafted CSS" by Dan Cederholm. Apply when writing CSS, HTML, Blade templates, or reviewing frontend code. CSS is king — refactor Tailwind when encountered.

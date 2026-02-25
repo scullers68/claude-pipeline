@@ -2,7 +2,7 @@
 
 > Forked from [aaddrick/claude-pipeline](https://github.com/aaddrick/claude-pipeline) — a portable `.claude/` folder for structured Claude Code development workflows.
 
-This fork modifies the pipeline to use **GitHub Issues as the single source of truth** for plans and tasks. Instead of generating local plan files during implementation, plans are written to GitHub Issues during a discovery phase and read back during implementation.
+This fork modifies the pipeline to use **issues as the single source of truth** for plans and tasks. Instead of generating local plan files during implementation, plans are written to issues during a discovery phase and read back during implementation. Supports GitHub Issues and Jira (via ACLI), with GitHub and GitLab for git hosting.
 
 ## Changes from Upstream
 
@@ -14,9 +14,9 @@ The original pipeline runs 4 stages before implementation (setup → research �
 ```
 /explore "vague idea or bug observation"
 ```
-Chains: understand → research codebase → evaluate approaches → plan → `gh issue create`
+Chains: understand → research codebase → evaluate approaches → plan → create issue
 
-The GH issue body contains the full plan with a **parseable task list**:
+The issue body contains the full plan with a **parseable task list**:
 ```markdown
 ## Implementation Tasks
 - [ ] `[backend-developer]` Add migration for new column
@@ -29,7 +29,7 @@ The GH issue body contains the full plan with a **parseable task list**:
 ```
 /implement-issue 42 main
 ```
-Reads the GH issue body → extracts tasks → implements → tests → reviews → creates PR.
+Reads the issue body → extracts tasks → implements → tests → reviews → creates PR/MR.
 
 ### No Git Worktrees
 
@@ -62,11 +62,12 @@ The adaptation skill walks you through a brainstorming session about your projec
 
 ## What's Inside
 
-- **22 skills** including the new `/explore` discovery skill
-- **10 specialized agents** (backend/frontend developers, reviewers, validators)
+- **24 skills** including `/explore` discovery, Playwright E2E testing, and MCP tools reference
+- **11 specialized agents** (developers, reviewers, validators, Playwright test developer)
+- **10 platform wrapper scripts** for GitHub/GitLab/Jira abstraction
 - **2 hooks** for session initialization and post-PR simplification
 - **3 orchestration scripts** for batch issue processing and end-to-end implementation
-- **11 JSON schemas** for structured output (reduced from 14 — removed redundant pre-implementation schemas)
+- **11 JSON schemas** for structured output
 - **Quality gates** at every level: spec compliance, code quality, test validation
 
 ## Architecture
@@ -77,12 +78,12 @@ The adaptation skill walks you through a brainstorming session about your projec
 Phase 1: Discovery
   /explore "idea"
     → understand → research → evaluate → plan
-    → gh issue create (with structured plan)
+    → create issue (with structured plan)
 
 Phase 2: Implementation
   /implement-issue N main
-    → parse GH issue → validate plan
-    → implement → test → review → PR
+    → parse issue → validate plan
+    → implement → test → review → PR/MR
 ```
 
 ### Orchestration Hierarchy
@@ -101,11 +102,61 @@ handle-issues (skill) → batch-orchestrator.sh
 
 | Category | Skills | Purpose |
 |----------|--------|---------|
-| **Discovery** | explore | Turn ideas into fully-planned GH issues |
+| **Discovery** | explore | Turn ideas into fully-planned issues |
 | **Process** | brainstorming, TDD, systematic-debugging, writing-plans, dispatching-parallel-agents | Enforce discipline and methodology |
 | **Workflow** | handle-issues, implement-issue, process-pr, subagent-driven-development, executing-plans | Automate multi-step development workflows |
 | **Domain** | bulletproof-frontend, ui-design-fundamentals, write-docblocks, review-ui | Tech-stack-specific guidance |
 | **Meta** | using-skills, writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop | Maintain and extend the pipeline itself |
+
+## Platform Configuration
+
+The pipeline is platform-agnostic. All issue tracker and git host interactions go through wrapper scripts in `.claude/scripts/platform/` that dispatch to the correct CLI based on `.claude/config/platform.sh`.
+
+**Supported platforms:**
+
+| | GitHub | GitLab | Jira |
+|---|---|---|---|
+| **Git hosting** | `gh` CLI | `glab` CLI | — |
+| **Issue tracking** | `gh` CLI | `glab` CLI | `acli` (Atlassian CLI) |
+
+**Configuration:** Run `/adapting-claude-pipeline` to set your platform during brainstorming, or edit `.claude/config/platform.sh` directly:
+
+```bash
+TRACKER="jira"           # github | jira
+TRACKER_CLI="acli"       # gh | acli
+GIT_HOST="github"        # github | gitlab
+GIT_CLI="gh"             # gh | glab
+JIRA_PROJECT="PROJ"      # Jira project key
+MERGE_STYLE="squash"     # squash | merge | rebase
+```
+
+**Jira users:** Install [ACLI](https://bobswift.atlassian.net/wiki/spaces/ACLI) and configure authentication before using the pipeline.
+
+## E2E Testing
+
+The pipeline includes a Playwright E2E testing skill and agent for browser-based testing.
+
+- **`playwright-testing` skill** — POM conventions, selector strategy, waiting patterns, anti-patterns
+- **`playwright-test-developer` agent** — Senior QA specialist that writes E2E tests following the skill's conventions
+- **`/explore`** automatically generates E2E test tasks when `TEST_E2E_CMD` is configured in `platform.sh`
+
+The orchestrator runs unit tests first, then E2E tests (fail fast):
+
+```bash
+# In platform.sh
+TEST_UNIT_CMD="npm test"
+TEST_E2E_CMD="npx playwright test"
+```
+
+## MCP Tools
+
+The pipeline optionally integrates with MCP servers for enhanced code exploration and documentation lookup.
+
+- **Context7** — Framework/library API documentation. Used by `/explore` and `/writing-agents` before falling back to web search.
+- **Serena** — Structured code navigation (class hierarchies, method signatures, call graphs).
+- **`mcp-tools` skill** — Decision matrix for choosing the right exploration tool.
+
+MCP tools are optional. When unavailable, the pipeline falls back to Grep/Glob and web search. Remove the `mcp-tools` skill during `/adapting-claude-pipeline` if not using MCP servers.
 
 ## Usage
 
@@ -114,11 +165,11 @@ handle-issues (skill) → batch-orchestrator.sh
 ```bash
 # Phase 1: Discover and plan
 > /explore "users can't reset their password from the settings page"
-# Creates GH issue #42 with full plan
+# Creates issue #42 with full plan
 
 # Phase 2: Implement
 > /implement-issue 42 main
-# Reads plan from issue, implements, creates PR
+# Reads plan from issue, implements, creates PR/MR
 ```
 
 ### Batch Processing
@@ -139,7 +190,7 @@ Issues are processed sequentially on feature branches. Each issue goes through t
 
 ## Task Format Specification
 
-The orchestrator parses tasks from GH issue bodies using this convention:
+The orchestrator parses tasks from issue bodies using this convention:
 
 ```markdown
 - [ ] `[agent-name]` Task description
@@ -174,7 +225,12 @@ After resolving a bug or observing a recurring problem:
 ## Testing
 
 ```bash
+# Orchestrator tests
 cd .claude/scripts/implement-issue-test
+./run-tests.sh
+
+# Platform wrapper tests
+cd .claude/scripts/platform-test
 ./run-tests.sh
 ```
 
@@ -182,7 +238,7 @@ cd .claude/scripts/implement-issue-test
 
 This fork preserves the upstream's core philosophy while adding one key principle:
 
-**GitHub Issues are the single source of truth.** Plans, research, and task lists live in GH issues, not in local files. This prevents drift between what was planned and what the pipeline executes.
+**Issues are the single source of truth.** Plans, research, and task lists live in issues (GitHub Issues or Jira), not in local files. This prevents drift between what was planned and what the pipeline executes.
 
 Other preserved principles:
 - **Skills are TDD for process documentation** — tested with subagents before deployment
