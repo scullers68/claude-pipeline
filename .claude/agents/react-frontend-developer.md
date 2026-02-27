@@ -1,3 +1,4 @@
+<!-- STACK-SPECIFIC: Replace or delete during /adapting-claude-pipeline. This is an example agent for a React/Next.js frontend. -->
 ---
 name: react-frontend-developer
 model: sonnet

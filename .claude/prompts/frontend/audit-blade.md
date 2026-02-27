@@ -1,3 +1,4 @@
+<!-- STACK-SPECIFIC: Replace or delete during /adapting-claude-pipeline. This is an example prompt for Laravel Blade templates. -->
 # Audit Blade (No Changes)
 
 Audit the referenced blade file against `docs/STYLEGUIDE.md` and list issues **without fixing them**.

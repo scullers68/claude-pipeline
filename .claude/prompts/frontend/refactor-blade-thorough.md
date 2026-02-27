@@ -1,3 +1,4 @@
+<!-- STACK-SPECIFIC: Replace or delete during /adapting-claude-pipeline. This is an example prompt for Laravel Blade templates. -->
 # Refactor Blade (Thorough)
 
 Review and refactor the referenced blade file using bulletproof frontend principles.
