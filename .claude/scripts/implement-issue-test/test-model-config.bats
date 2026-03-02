@@ -101,10 +101,10 @@ run_with_config() {
 	[[ "$output" == "standard" ]]
 }
 
-@test "stage fix maps to advanced" {
+@test "stage fix maps to standard" {
 	run_with_config '_stage_to_tier "fix"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "advanced" ]]
+	[[ "$output" == "standard" ]]
 }
 
 @test "stage test maps to light" {
@@ -119,10 +119,10 @@ run_with_config() {
 	[[ "$output" == "standard" ]]
 }
 
-@test "stage simplify maps to standard" {
+@test "stage simplify maps to light" {
 	run_with_config '_stage_to_tier "simplify"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "standard" ]]
+	[[ "$output" == "light" ]]
 }
 
 @test "stage pr maps to light" {
@@ -165,16 +165,16 @@ run_with_config() {
 # COMPLEXITY-TO-TIER MAPPING (_complexity_to_tier)
 # =============================================================================
 
-@test "complexity S maps to standard" {
+@test "complexity S maps to light" {
 	run_with_config '_complexity_to_tier "S"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "standard" ]]
+	[[ "$output" == "light" ]]
 }
 
-@test "complexity M maps to advanced" {
+@test "complexity M maps to standard" {
 	run_with_config '_complexity_to_tier "M"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "advanced" ]]
+	[[ "$output" == "standard" ]]
 }
 
 @test "complexity L maps to advanced" {
@@ -235,16 +235,16 @@ run_with_config() {
 	[[ "$output" == "haiku" ]]
 }
 
-@test "resolve_model returns opus for fix stage" {
+@test "resolve_model returns sonnet for fix stage" {
 	run_with_config 'resolve_model "fix"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
-@test "resolve_model returns sonnet for simplify stage" {
+@test "resolve_model returns haiku for simplify stage" {
 	run_with_config 'resolve_model "simplify"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "sonnet" ]]
+	[[ "$output" == "haiku" ]]
 }
 
 @test "resolve_model returns haiku for docs stage" {
@@ -275,16 +275,16 @@ run_with_config() {
 # resolve_model() - COMPLEXITY HINT OVERRIDE
 # =============================================================================
 
-@test "resolve_model with S complexity returns sonnet for implement stage" {
+@test "resolve_model with S complexity returns haiku for implement stage" {
 	run_with_config 'resolve_model "implement" "S"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "sonnet" ]]
+	[[ "$output" == "haiku" ]]
 }
 
-@test "resolve_model with M complexity returns opus for implement stage" {
+@test "resolve_model with M complexity returns sonnet for implement stage" {
 	run_with_config 'resolve_model "implement" "M"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model with L complexity returns opus for implement stage" {
@@ -295,11 +295,11 @@ run_with_config() {
 
 @test "complexity hint overrides stage default when provided" {
 	# fix stage defaults to advanced (opus)
-	# S complexity maps to standard (sonnet)
+	# S complexity maps to light (haiku)
 	# Complexity hint takes precedence — callers only pass it when intended
 	run_with_config 'resolve_model "fix" "S"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "sonnet" ]]
+	[[ "$output" == "haiku" ]]
 }
 
 @test "complexity hint upgrades review stage from standard to advanced" {
@@ -310,10 +310,10 @@ run_with_config() {
 	[[ "$output" == "opus" ]]
 }
 
-@test "complexity hint upgrades task-review from standard to advanced with M" {
+@test "complexity hint keeps task-review at standard with M" {
 	run_with_config 'resolve_model "task-review" "M"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 # =============================================================================
@@ -341,13 +341,13 @@ run_with_config() {
 @test "resolve_model matches fix prefix in fix-review-task-1-iter-1" {
 	run_with_config 'resolve_model "fix-review-task-1-iter-1"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model matches simplify prefix in simplify-task-1-iter-1" {
 	run_with_config 'resolve_model "simplify-task-1-iter-1"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "sonnet" ]]
+	[[ "$output" == "haiku" ]]
 }
 
 @test "resolve_model matches spec-review prefix in spec-review-iter-1" {
@@ -365,25 +365,25 @@ run_with_config() {
 @test "resolve_model matches fix prefix in fix-tests-iter-1" {
 	run_with_config 'resolve_model "fix-tests-iter-1"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model matches fix prefix in fix-task-1-attempt-1" {
 	run_with_config 'resolve_model "fix-task-1-attempt-1"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model matches fix prefix in fix-pr-review-iter-1" {
 	run_with_config 'resolve_model "fix-pr-review-iter-1"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model matches fix prefix in fix-test-quality-iter-1" {
 	run_with_config 'resolve_model "fix-test-quality-iter-1"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model matches task-review prefix in task-review-1-attempt-1" {
@@ -559,10 +559,10 @@ run_with_config() {
 # =============================================================================
 
 @test "resolve_model with composite stage and S complexity" {
-	# implement-task-1 defaults to opus, S overrides to sonnet
+	# implement-task-1 defaults to opus, S overrides to haiku
 	run_with_config 'resolve_model "implement-task-1" "S"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "sonnet" ]]
+	[[ "$output" == "haiku" ]]
 }
 
 @test "resolve_model with composite stage and L complexity" {
@@ -580,10 +580,10 @@ run_with_config() {
 }
 
 @test "resolve_model unknown composite stage with complexity hint" {
-	# Unknown stage falls back to opus, S complexity overrides to sonnet
+	# Unknown stage falls back to opus, S complexity overrides to haiku
 	run_with_config 'resolve_model "garbage-stage-name" "S"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "sonnet" ]]
+	[[ "$output" == "haiku" ]]
 }
 
 @test "resolve_model no arguments returns opus fallback" {
@@ -780,11 +780,10 @@ run_with_config() {
 }
 
 @test "resolve_model fallback still respects complexity hint" {
-	# Unknown stage falls back to opus, but M complexity also maps to advanced
-	# Net result: opus (both paths agree)
+	# Unknown stage falls back to advanced (opus), but M complexity overrides to standard (sonnet)
 	run_with_config 'resolve_model "nonexistent" "M"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model fallback with L complexity stays opus" {
@@ -906,10 +905,10 @@ run_with_config() {
 	[[ "$output" == "opus" ]]
 }
 
-@test "empty complexity string preserves fix stage default (opus)" {
+@test "empty complexity string preserves fix stage default (sonnet)" {
 	run_with_config 'resolve_model "fix" ""'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "empty complexity string preserves review stage default (sonnet)" {
@@ -958,4 +957,38 @@ run_with_config() {
 	"
 	[ "$status" -eq 0 ]
 	[[ "$output" == "clean" ]]
+}
+
+# =============================================================================
+# _next_model_up() - MODEL ESCALATION HIERARCHY
+# =============================================================================
+
+@test "_next_model_up escalates haiku to sonnet" {
+	run_with_config '_next_model_up "haiku"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "sonnet" ]]
+}
+
+@test "_next_model_up escalates sonnet to opus" {
+	run_with_config '_next_model_up "sonnet"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "opus" ]]
+}
+
+@test "_next_model_up keeps opus at ceiling" {
+	run_with_config '_next_model_up "opus"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "opus" ]]
+}
+
+@test "_next_model_up falls back to opus for unknown model" {
+	run_with_config '_next_model_up "gpt-4"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "opus" ]]
+}
+
+@test "_next_model_up handles empty input" {
+	run_with_config '_next_model_up ""'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "opus" ]]
 }

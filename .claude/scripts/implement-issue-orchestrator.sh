@@ -861,6 +861,47 @@ run_stage() {
         return 1
     fi
 
+    # Check for max turns exhaustion — escalate to next model up and retry.
+    # CLI returns subtype:"error_max_turns" with exit code 0 and is_error:false,
+    # but no structured_output, so we detect it before the structured output check.
+    local output_subtype
+    output_subtype=$(printf '%s' "$output" | jq -r '.subtype // empty' 2>/dev/null)
+    if [[ "$output_subtype" == "error_max_turns" ]]; then
+        local escalated_model
+        escalated_model=$(_next_model_up "$model")
+
+        if [[ "$escalated_model" == "$model" ]]; then
+            # Already at ceiling (opus) — can't escalate further
+            log_error "Stage $stage_name hit max turns with $model (ceiling) — cannot escalate"
+            echo '{"status":"error","error":"max_turns_exhausted_at_ceiling"}'
+            return 1
+        fi
+
+        log "WARN: Stage $stage_name hit max turns with $model — escalating to $escalated_model (no turn cap)"
+        printf '%s\n' "=== $stage_name escalating: $model → $escalated_model ===" >> "$stage_log"
+
+        # Retry with escalated model and no --max-turns cap
+        local escalated_fallback
+        escalated_fallback=$(_next_model_up "$escalated_model")
+        local -a escalated_fallback_args=()
+        if [[ "$escalated_fallback" != "$escalated_model" ]]; then
+            escalated_fallback_args=(--fallback-model "$escalated_fallback")
+        fi
+
+        output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
+            ${agent_args[@]+"${agent_args[@]}"} \
+            --model "$escalated_model" \
+            ${escalated_fallback_args[@]+"${escalated_fallback_args[@]}"} \
+            --dangerously-skip-permissions \
+            --output-format json \
+            --json-schema "$schema" \
+            2>&1) || exit_code=$?
+
+        printf '%s\n' "=== $stage_name escalation output ===" >> "$stage_log"
+        printf '%s\n' "$output" >> "$stage_log"
+        printf '%s\n' "=== escalation exit code: $exit_code ===" >> "$stage_log"
+    fi
+
     # Check rate limit
     if detect_rate_limit "$output"; then
         handle_rate_limit "$output"
