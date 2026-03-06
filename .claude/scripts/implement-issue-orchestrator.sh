@@ -978,6 +978,7 @@ run_quality_loop() {
 
     local loop_approved=false
     local loop_iteration=0  # Per-loop counter (resets each call)
+    local skip_simplify=false  # Set when prior simplify reported no changes; reset after any fix
 
     while [[ "$loop_approved" != "true" ]]; do
         loop_iteration=$((loop_iteration + 1))
@@ -994,7 +995,12 @@ run_quality_loop() {
         # -------------------------------------------------------------------------
         # SIMPLIFY
         # -------------------------------------------------------------------------
-        local simplify_prompt="Simplify modified TypeScript/React files in the current branch in working directory $loop_dir on branch $loop_branch.
+        local simplify_summary="No changes"
+
+        if [[ "$skip_simplify" == "true" ]]; then
+            log "Skipping simplify for $stage_prefix iter $loop_iteration (prior iteration reported no changes)"
+        else
+            local simplify_prompt="Simplify modified TypeScript/React files in the current branch in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT SCOPE CONSTRAINT: This is for issue #$ISSUE_NUMBER. Only simplify code that is directly related to the issue's goals. Do NOT apply unrelated refactoring to files that were only incidentally touched or are outside the issue's focus area.
 
@@ -1005,11 +1011,20 @@ If no TypeScript/React files were modified as part of this issue's implementatio
 Simplify code for clarity and consistency without changing functionality.
 Output a summary of changes made."
 
-        local simplify_result
-        simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
+            local simplify_result
+            simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
 
-        local simplify_summary
-        simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.summary // "No changes"')
+            simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.summary // "No changes"')
+
+            # If simplify reported no changes, skip it on the next iteration until a
+            # fix stage runs (which may introduce new simplification opportunities).
+            if [[ "${simplify_summary,,}" == *"no changes"* ]]; then
+                skip_simplify=true
+                log "Simplify reported no changes — will skip simplify on next iteration"
+            else
+                skip_simplify=false
+            fi
+        fi
 
         # -------------------------------------------------------------------------
         # REVIEW
@@ -1144,6 +1159,9 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
+
+            # Fix stage introduced new changes — simplify should run next iteration.
+            skip_simplify=false
         fi
     done
 
