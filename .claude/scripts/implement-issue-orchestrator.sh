@@ -2387,7 +2387,7 @@ Commit your changes."
             verify_on_feature_branch "$branch" || true
 
             local e2e_fix_result
-            e2e_fix_result=$(run_stage "fix-e2e" "$e2e_fix_prompt" "implement-issue-fix.json" "$AGENT")
+            e2e_fix_result=$(run_stage "fix-e2e" "$e2e_fix_prompt" "implement-issue-fix.json" "$AGENT" "$max_task_size")
 
             local e2e_fix_summary
             e2e_fix_summary=$(printf '%s' "$e2e_fix_result" | jq -r '.summary // "Fix applied"')
