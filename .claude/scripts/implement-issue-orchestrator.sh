@@ -978,6 +978,7 @@ run_quality_loop() {
 
     local loop_approved=false
     local loop_iteration=0  # Per-loop counter (resets each call)
+    local skip_simplify=false  # Set when prior simplify reported no changes; reset after any fix
 
     while [[ "$loop_approved" != "true" ]]; do
         loop_iteration=$((loop_iteration + 1))
@@ -994,7 +995,12 @@ run_quality_loop() {
         # -------------------------------------------------------------------------
         # SIMPLIFY
         # -------------------------------------------------------------------------
-        local simplify_prompt="Simplify modified TypeScript/React files in the current branch in working directory $loop_dir on branch $loop_branch.
+        local simplify_summary="No changes"
+
+        if [[ "$skip_simplify" == "true" ]]; then
+            log "Skipping simplify for $stage_prefix iter $loop_iteration (prior iteration reported no changes)"
+        else
+            local simplify_prompt="Simplify modified TypeScript/React files in the current branch in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT SCOPE CONSTRAINT: This is for issue #$ISSUE_NUMBER. Only simplify code that is directly related to the issue's goals. Do NOT apply unrelated refactoring to files that were only incidentally touched or are outside the issue's focus area.
 
@@ -1005,11 +1011,20 @@ If no TypeScript/React files were modified as part of this issue's implementatio
 Simplify code for clarity and consistency without changing functionality.
 Output a summary of changes made."
 
-        local simplify_result
-        simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
+            local simplify_result
+            simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
 
-        local simplify_summary
-        simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.summary // "No changes"')
+            simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.summary // "No changes"')
+
+            # If simplify reported no changes, skip it on the next iteration until a
+            # fix stage runs (which may introduce new simplification opportunities).
+            if echo "$simplify_summary" | grep -qi "no changes"; then
+                skip_simplify=true
+                log "Simplify reported no changes — will skip simplify on next iteration"
+            else
+                skip_simplify=false
+            fi
+        fi
 
         # -------------------------------------------------------------------------
         # REVIEW
@@ -1093,7 +1108,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
                 end
             ' 2>/dev/null || printf '0')
 
-            if (( repeat_ratio > 50 )); then
+            if (( repeat_ratio > 33 )); then
                 log_warn "Quality loop convergence failure: ${repeat_ratio}% of issues are repeats from prior iterations. Exiting loop."
                 loop_approved=true
                 break
@@ -1101,12 +1116,14 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         fi
 
         # MAJOR-ISSUE OVERRIDE: same logic as PR review (claude-pipeline#25)
+        local major_issue_override=false
         if [[ "$review_verdict" == "approved" ]]; then
             local major_issue_count
             major_issue_count=$(printf '%s' "$review_result" | jq '[.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
             if (( major_issue_count > 0 )); then
                 log_warn "Quality review for $stage_prefix approved but $major_issue_count major issue(s) found — overriding to changes_requested"
                 review_verdict="changes_requested"
+                major_issue_override=true
             fi
         fi
 
@@ -1115,14 +1132,26 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             log "Quality loop for $stage_prefix approved on iteration $loop_iteration"
         else
             local review_comments
-            review_comments=$(printf '%s' "$review_result" | jq -r '.comments // "No comments"')
+            if $major_issue_override; then
+                # Filter to include only major-severity issues
+                review_comments=$(printf '%s' "$review_result" | jq -r '[.issues // [] | .[] | select(.severity == "major") | .description] | join("\n- ")')
+            else
+                review_comments=$(printf '%s' "$review_result" | jq -r '.comments // "No comments"')
+            fi
             printf '%s\n' "$review_comments" >> "$LOG_BASE/context/review-comments.json"
 
             local cumulative_findings=""
             if [[ -f "$review_history_file" ]]; then
-                cumulative_findings=$(jq -r '
-                    [.[] | .issues[]? | .description] | unique | join("\n- ")
-                ' "$review_history_file" 2>/dev/null || printf '')
+                if $major_issue_override; then
+                    # Filter to include only major-severity issues
+                    cumulative_findings=$(jq -r '
+                        [.[-2:] | .[] | .issues[]? | select(.severity == "major") | .description] | unique | join("\n- ")
+                    ' "$review_history_file" 2>/dev/null || printf '')
+                else
+                    cumulative_findings=$(jq -r '
+                        [.[-2:] | .[] | .issues[]? | .description] | unique | join("\n- ")
+                    ' "$review_history_file" 2>/dev/null || printf '')
+                fi
             fi
 
             local fix_prompt="Address code review feedback in working directory $loop_dir on branch $loop_branch.
@@ -1144,6 +1173,9 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
+
+            # Fix stage introduced new changes — simplify should run next iteration.
+            skip_simplify=false
         fi
     done
 
