@@ -1116,12 +1116,14 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         fi
 
         # MAJOR-ISSUE OVERRIDE: same logic as PR review (claude-pipeline#25)
+        local major_issue_override=false
         if [[ "$review_verdict" == "approved" ]]; then
             local major_issue_count
             major_issue_count=$(printf '%s' "$review_result" | jq '[.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
             if (( major_issue_count > 0 )); then
                 log_warn "Quality review for $stage_prefix approved but $major_issue_count major issue(s) found — overriding to changes_requested"
                 review_verdict="changes_requested"
+                major_issue_override=true
             fi
         fi
 
@@ -1130,14 +1132,26 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             log "Quality loop for $stage_prefix approved on iteration $loop_iteration"
         else
             local review_comments
-            review_comments=$(printf '%s' "$review_result" | jq -r '.comments // "No comments"')
+            if $major_issue_override; then
+                # Filter to include only major-severity issues
+                review_comments=$(printf '%s' "$review_result" | jq -r '[.issues // [] | .[] | select(.severity == "major") | .description] | join("\n- ")')
+            else
+                review_comments=$(printf '%s' "$review_result" | jq -r '.comments // "No comments"')
+            fi
             printf '%s\n' "$review_comments" >> "$LOG_BASE/context/review-comments.json"
 
             local cumulative_findings=""
             if [[ -f "$review_history_file" ]]; then
-                cumulative_findings=$(jq -r '
-                    [.[-2:] | .[] | .issues[]? | .description] | unique | join("\n- ")
-                ' "$review_history_file" 2>/dev/null || printf '')
+                if $major_issue_override; then
+                    # Filter to include only major-severity issues
+                    cumulative_findings=$(jq -r '
+                        [.[-2:] | .[] | .issues[]? | select(.severity == "major") | .description] | unique | join("\n- ")
+                    ' "$review_history_file" 2>/dev/null || printf '')
+                else
+                    cumulative_findings=$(jq -r '
+                        [.[-2:] | .[] | .issues[]? | .description] | unique | join("\n- ")
+                    ' "$review_history_file" 2>/dev/null || printf '')
+                fi
             fi
 
             local fix_prompt="Address code review feedback in working directory $loop_dir on branch $loop_branch.
