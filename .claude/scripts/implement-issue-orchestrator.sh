@@ -1189,7 +1189,9 @@ get_pr_review_config() {
 
     if (( diff_lines < 20 )); then
         printf '{"model":"haiku","timeout":300,"max_iterations":1}'
-    elif (( diff_lines < 100 )); then
+    elif (( diff_lines < 50 )); then
+        printf '{"model":"haiku","timeout":600,"max_iterations":1}'
+    elif (( diff_lines < 200 )); then
         printf '{"model":"sonnet","timeout":900,"max_iterations":2}'
     else
         printf '{"model":"sonnet","timeout":1800,"max_iterations":2}'
