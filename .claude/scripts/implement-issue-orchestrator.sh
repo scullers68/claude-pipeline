@@ -1487,6 +1487,45 @@ detect_change_scope() {
     return 0
 }
 
+# Checks whether every failure in a JSON failures array is caused by an
+# environment infrastructure error (Redis, database connection, HTTP 500,
+# network timeouts, etc.) rather than a code-level defect.
+#
+# When ALL failures are environment-related, dispatching a fix agent is
+# pointless — no code change can resolve infrastructure unavailability.
+#
+# Arguments:
+#   $1 - JSON array of failure objects with "test" and "message" fields
+# Returns:
+#   0 if every failure matches an environment pattern (skip fix dispatch)
+#   1 if any failure is code-level (fix dispatch should proceed)
+all_failures_environment_related() {
+	local failures_json="$1"
+	local count
+	count=$(printf '%s' "$failures_json" \
+		| jq 'length // 0' 2>/dev/null || echo 0)
+	if (( count == 0 )); then
+		return 1
+	fi
+	# Count failures whose combined test+message does NOT match any known
+	# environment-error pattern.  If that count is zero every failure is an
+	# infrastructure issue and we should skip the fix agent.
+	local non_env_count
+	local env_pattern
+	env_pattern='redis|ECONNREFUSED|connection refused|HTTP 500'
+	env_pattern+='|database connection|socket hang up'
+	env_pattern+='|ETIMEDOUT|ENOTFOUND|connect timeout|ECONNRESET'
+	non_env_count=$(printf '%s' "$failures_json" \
+		| jq --arg pat "$env_pattern" '
+			[.[] | select(
+				((.message // "") + " " + (.test // ""))
+				| test($pat; "i")
+				| not
+			)] | length
+		' 2>/dev/null || echo 1)
+	(( non_env_count == 0 ))
+}
+
 # Run the test loop (test+validate -> fix, repeat until pass)
 # Called once after all tasks complete
 # Flow:
@@ -1800,6 +1839,26 @@ $test_summary" "default"
                     comment_issue "Test Loop: Pre-existing Failures ($test_iteration/$MAX_TEST_ITERATIONS)" \
                         "ℹ️ $skipped_count pre-existing failure(s) detected (not from PR-changed test files). Skipping fix-agent." "default"
                 fi
+                loop_complete=true
+                break
+            fi
+
+            # Skip fix agent when every remaining failure is an environment
+            # infrastructure error (Redis, DB, HTTP 500, network timeouts).
+            # Code changes cannot resolve infrastructure unavailability, so
+            # dispatching a fix agent would waste iterations and tokens.
+            if all_failures_environment_related "$pr_failures"; then
+                log "INFO: All failures are environment-related." \
+                    "Skipping fix-agent dispatch."
+                local env_title="Test Loop: Environment Errors"
+                env_title+=" ($test_iteration/$MAX_TEST_ITERATIONS)"
+                local env_body
+                env_body="ℹ️ All test failures appear to be"
+                env_body+=" environment-related (Redis/DB connection"
+                env_body+=" errors, HTTP 500, network timeouts)."
+                env_body+=" These require infrastructure fixes, not code"
+                env_body+=" changes. Skipping fix-agent."
+                comment_issue "$env_title" "$env_body" "default"
                 loop_complete=true
                 break
             fi
