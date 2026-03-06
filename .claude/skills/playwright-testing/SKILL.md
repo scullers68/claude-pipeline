@@ -135,6 +135,15 @@ e2e/
 | `npx playwright show-report` | View HTML report |
 | `npx playwright test --update-snapshots` | Update screenshot baselines |
 
+## Output Management
+
+Playwright test runs produce verbose output. Use truncation and background execution to keep context clean:
+
+- **Pass/fail checks:** `npx playwright test 2>&1 | tail -20`
+- **Full test suites:** Use `run_in_background: true` and read the summary with `TaskOutput`
+- **Debugging specific failures:** Only request full output when investigating a specific failing test
+- **If truncated output shows failure:** Re-run the specific failing test without truncation to see the full error
+
 ## Integration
 
 **Used by:** `playwright-test-developer` agent

@@ -107,7 +107,13 @@ You MUST complete each phase before proceeding to the next.
 
    **This reveals:** Which layer fails (secrets → workflow ✓, workflow → build ✗)
 
-5. **Trace Data Flow**
+5. **Manage Command Output**
+      - When running diagnostic commands that produce verbose output, use `| tail -20` to capture the relevant end
+      - For long-running diagnostic builds, use `run_in_background: true`
+      - Full output floods context — capture only what you need to form hypotheses
+      - If truncated output isn't enough to diagnose, re-run without truncation for the specific failing command
+
+6. **Trace Data Flow**
 
    **WHEN error is deep in call stack:**
 

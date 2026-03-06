@@ -93,3 +93,5 @@ Over 99% of token usage is reading, not writing. These practices reduce cost sig
 - **Conversation length:** If a conversation exceeds ~40 messages, suggest starting a fresh conversation with a brief summary. Long conversations cost 2x+ more per message due to context re-reading.
 - **Model selection:** For simple tasks (run tests, format files, quick questions), suggest `/model haiku`. Save opus for complex multi-file changes and architecture decisions.
 - **Be specific:** "Fix the bug in `src/auth.js` line 42" triggers far fewer tool calls than "fix the login bug". File paths and line numbers reduce exploratory reading.
+- **Truncate command output:** For builds and test runs, pipe through `| tail -10` to capture only the result. If it fails, re-run without truncation to see the full error. A 200-line build log re-read 50 times = 10,000 lines of wasted context.
+- **Background long processes:** For builds >30s, docker operations, or full test suites, use `run_in_background: true` and read the result with `TaskOutput` when notified — keeps context clean while waiting.
