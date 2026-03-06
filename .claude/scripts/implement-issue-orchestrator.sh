@@ -1944,6 +1944,8 @@ $validate_summary" "default"
 
 $validate_issues
 
+SCOPE CONSTRAINT: Only fix quality issues in test files that correspond to PR-changed implementation files. Do not modify tests for unrelated implementation files.
+
 Fix the test quality issues (add missing assertions, remove TODOs, add edge case tests, etc.) and commit.
 Output a summary of fixes applied."
 
