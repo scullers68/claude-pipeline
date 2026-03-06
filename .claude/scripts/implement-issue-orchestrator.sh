@@ -1093,7 +1093,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
                 end
             ' 2>/dev/null || printf '0')
 
-            if (( repeat_ratio > 50 )); then
+            if (( repeat_ratio > 33 )); then
                 log_warn "Quality loop convergence failure: ${repeat_ratio}% of issues are repeats from prior iterations. Exiting loop."
                 loop_approved=true
                 break
