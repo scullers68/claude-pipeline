@@ -1865,7 +1865,7 @@ $test_summary" "default"
                 break
             fi
 
-            # Convergence detection: exit early if same PR-scoped failures repeat 3 times
+            # Convergence detection: exit early if same PR-scoped failures repeat 2 times
             local failure_sig
             failure_sig=$(printf '%s' "$pr_failures" | md5sum | cut -d' ' -f1)
             prior_failure_sigs="${prior_failure_sigs} ${failure_sig}"
