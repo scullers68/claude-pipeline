@@ -860,9 +860,32 @@ run_stage() {
             printf '%s\n' "$timeout_structured"
             return 0
         fi
-        log_error "Stage $stage_name timed out after ${stage_timeout}s"
-        echo '{"status":"error","error":"timeout"}'
-        return 1
+
+        # Retry with a 20% longer timeout before giving up
+        local retry_timeout
+        retry_timeout=$(( stage_timeout + stage_timeout / 5 ))
+        log "WARN: Stage $stage_name timed out after ${stage_timeout}s — retrying with ${retry_timeout}s timeout"
+        printf '%s\n' "=== $stage_name timeout retry (${retry_timeout}s) ===" >> "$stage_log"
+
+        exit_code=0
+        output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
+            ${agent_args[@]+"${agent_args[@]}"} \
+            --model "$model" \
+            ${fallback_args[@]+"${fallback_args[@]}"} \
+            ${turns_args[@]+"${turns_args[@]}"} \
+            --dangerously-skip-permissions \
+            --output-format json \
+            --json-schema "$schema" \
+            2>&1) || exit_code=$?
+
+        printf '%s\n' "$output" >> "$stage_log"
+        printf '%s\n' "=== timeout retry exit code: $exit_code ===" >> "$stage_log"
+
+        if (( exit_code == 124 )); then
+            log_error "Stage $stage_name timed out again after ${retry_timeout}s"
+            echo '{"status":"error","error":"timeout"}'
+            return 1
+        fi
     fi
 
     # Check for max turns exhaustion — escalate to next model up and retry.

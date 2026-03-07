@@ -266,7 +266,7 @@ teardown() {
 # =============================================================================
 
 @test "run_stage returns timeout error on exit code 124" {
-    # Override timeout to simulate timeout
+    # Override timeout to simulate timeout on both initial attempt and retry
     timeout() {
         shift  # skip timeout value
         return 124
@@ -276,6 +276,39 @@ teardown() {
     run run_stage "test" "prompt" "test-schema.json"
     [ "$status" -eq 1 ]
     [[ "$output" == *"timeout"* ]]
+}
+
+@test "run_stage retries with 20% longer timeout after initial timeout" {
+    # Record which timeout values were used across calls
+    local calls_file="$TEST_TMP/timeout-calls.txt"
+    timeout() {
+        local t="$1"
+        printf '%s\n' "$t" >> "$calls_file"
+        shift  # skip timeout value
+        if [[ "$(wc -l < "$calls_file")" -eq 1 ]]; then
+            return 124  # first call: simulate timeout
+        fi
+        # second call (retry): succeed with structured output
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export calls_file
+
+    run run_stage "test" "prompt" "test-schema.json"
+    [ "$status" -eq 0 ]
+
+    # Verify two timeout calls were made
+    local call_count
+    call_count=$(wc -l < "$calls_file")
+    (( call_count == 2 )) || fail "Expected 2 timeout calls, got $call_count"
+
+    # Verify retry timeout is 20% larger than initial timeout
+    local first_timeout second_timeout expected_retry
+    first_timeout=$(sed -n '1p' "$calls_file")
+    second_timeout=$(sed -n '2p' "$calls_file")
+    expected_retry=$(( first_timeout + first_timeout / 5 ))
+    (( second_timeout == expected_retry )) || \
+        fail "Expected retry timeout ${expected_retry}s, got ${second_timeout}s"
 }
 
 # =============================================================================
