@@ -117,6 +117,17 @@ teardown() {
     [ "$MAX_PR_REVIEW_ITERATIONS" -eq 2 ]
 }
 
+@test "MAX_TEST_ITERATIONS is 7" {
+    [ "$MAX_TEST_ITERATIONS" -eq 7 ]
+}
+
+@test "MAX_TEST_ITERATIONS is declared readonly" {
+    local script_content
+    script_content=$(cat "$ORCHESTRATOR_SCRIPT")
+
+    [[ "$script_content" == *"readonly MAX_TEST_ITERATIONS=7"* ]]
+}
+
 @test "MAX_VALIDATION_FIX_ITERATIONS is 2" {
     [ "$MAX_VALIDATION_FIX_ITERATIONS" -eq 2 ]
 }
@@ -212,6 +223,8 @@ teardown() {
 
     [[ "$script_content" == *"readonly MAX_QUALITY_ITERATIONS"* ]]
     [[ "$script_content" == *"readonly MAX_PR_REVIEW_ITERATIONS"* ]]
+    [[ "$script_content" == *"readonly MAX_TEST_ITERATIONS"* ]]
+    [[ "$script_content" == *"readonly MAX_VALIDATION_FIX_ITERATIONS"* ]]
     [[ "$script_content" == *"readonly RATE_LIMIT_BUFFER"* ]]
     [[ "$script_content" == *"readonly RATE_LIMIT_DEFAULT_WAIT"* ]]
 }
