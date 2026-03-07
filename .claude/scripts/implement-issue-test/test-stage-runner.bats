@@ -607,6 +607,131 @@ teardown() {
 }
 
 # =============================================================================
+# TIMEOUT .RESULT FALLBACK
+# =============================================================================
+
+@test "run_stage uses .result fallback when timeout occurs with no structured_output" {
+	# When exit 124 occurs but output has .is_error:false and .result (no
+	# .structured_output), run_stage must use a fallback payload and return 0.
+	local calls_file="$TEST_TMP/result-fallback-calls.txt"
+	timeout() {
+		local t="$1"; shift
+		printf 'CALLED\n' >> "$calls_file"
+		echo '{"result":"Summary of work done","is_error":false}'
+		return 124
+	}
+	export -f timeout
+	export calls_file
+
+	local result
+	result=$(run_stage "test" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local status_val
+	status_val=$(printf '%s' "$result" | jq -r '.status')
+	[ "$status_val" = "success" ] || \
+		fail "Expected status=success, got: $status_val (result: $result)"
+
+	local summary_val
+	summary_val=$(printf '%s' "$result" | jq -r '.summary')
+	[ "$summary_val" = "Summary of work done" ] || \
+		fail "Expected summary='Summary of work done', got: $summary_val"
+
+	# Only one timeout call — no retry should happen
+	local call_count
+	call_count=$(wc -l < "$calls_file")
+	(( call_count == 1 )) || \
+		fail "Expected 1 timeout call (no retry on fallback), got $call_count"
+}
+
+@test "run_stage logs WARN when using .result fallback on timeout" {
+	timeout() {
+		shift
+		echo '{"result":"Fallback content","is_error":false}'
+		return 124
+	}
+	export -f timeout
+
+	run_stage "test" "prompt" "test-schema.json" >/dev/null 2>/dev/null
+
+	grep -q "produced .result" "$LOG_FILE" || \
+		fail "Expected WARN about .result fallback in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage does not use .result fallback when is_error is true on timeout" {
+	# When output has is_error:true the fallback must not trigger;
+	# the retry path should be attempted instead.
+	local calls_file="$TEST_TMP/no-fallback-calls.txt"
+	timeout() {
+		local t="$1"; shift
+		printf 'CALLED\n' >> "$calls_file"
+		echo '{"result":"some content","is_error":true}'
+		return 124
+	}
+	export -f timeout
+	export calls_file
+
+	run run_stage "test" "prompt" "test-schema.json"
+	[ "$status" -eq 1 ]
+
+	# Both initial attempt and retry must have been called (fallback skipped)
+	local call_count
+	call_count=$(wc -l < "$calls_file")
+	(( call_count == 2 )) || \
+		fail "Expected 2 timeout calls (fallback skipped, retry made), got $call_count"
+}
+
+# =============================================================================
+# DIAGNOSTIC LOGGING
+# =============================================================================
+
+@test "run_stage logs diagnostic byte count when structured output extraction fails" {
+	# Output has is_error:true — neither .structured_output nor .result fallback
+	# will match, so the diagnostic log must fire before the error return.
+	timeout() {
+		shift
+		echo '{"is_error":true,"result":"error occurred"}'
+	}
+	export -f timeout
+
+	run run_stage "test" "prompt" "test-schema.json"
+	[ "$status" -eq 1 ]
+
+	grep -q "Diagnostic fallback failure — Output byte count:" "$LOG_FILE" || \
+		fail "Expected diagnostic byte count in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage logs diagnostic output preview when structured output extraction fails" {
+	timeout() {
+		shift
+		echo '{"is_error":true,"result":"unique diagnostic content xyz"}'
+	}
+	export -f timeout
+
+	run run_stage "test" "prompt" "test-schema.json"
+	[ "$status" -eq 1 ]
+
+	grep -q "Diagnostic fallback failure — First 500 characters:" "$LOG_FILE" || \
+		fail "Expected diagnostic preview in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage diagnostic log captures actual output content" {
+	# The preview logged must include the raw output content, making it useful
+	# for debugging what the model actually returned.
+	timeout() {
+		shift
+		echo '{"is_error":true,"result":"recognizable-debug-marker-abc123"}'
+	}
+	export -f timeout
+
+	run run_stage "test" "prompt" "test-schema.json"
+	[ "$status" -eq 1 ]
+
+	grep -q "recognizable-debug-marker-abc123" "$LOG_FILE" || \
+		fail "Diagnostic log must include actual output content. Log: $(cat "$LOG_FILE")"
+}
+
+# =============================================================================
 # MODEL ESCALATION — error_max_turns
 # =============================================================================
 
