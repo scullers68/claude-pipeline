@@ -1122,11 +1122,18 @@ run_quality_loop() {
         if [[ "$skip_simplify" == "true" ]]; then
             log "Skipping simplify for $stage_prefix iter $loop_iteration (prior iteration reported no changes)"
         else
+            # Pre-compute modified TypeScript/React files (three-dot merge-base diff)
+            # before simplify stage. Recomputed each iteration since fix stages may add commits.
+            local simplify_changed_files_raw simplify_changed_files
+            simplify_changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only -- '*.ts' '*.tsx' 2>/dev/null || true)
+            simplify_changed_files=$(printf '%s\n' "$simplify_changed_files_raw" | grep -v -E '^$' || true)
+
             local simplify_prompt="Simplify modified TypeScript/React files in the current branch in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT SCOPE CONSTRAINT: This is for issue #$ISSUE_NUMBER. Only simplify code that is directly related to the issue's goals. Do NOT apply unrelated refactoring to files that were only incidentally touched or are outside the issue's focus area.
 
-Get modified files with: git -C $loop_dir diff $BASE_BRANCH...HEAD --name-only -- '*.ts' '*.tsx'
+MODIFIED TYPESCRIPT/REACT FILES:
+$simplify_changed_files
 
 If no TypeScript/React files were modified as part of this issue's implementation, make no changes and report 'No changes to simplify'.
 
