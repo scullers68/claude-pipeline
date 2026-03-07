@@ -163,12 +163,112 @@ teardown() {
 }
 
 # =============================================================================
+# FIELD-AWARE STRUCTURED OUTPUT RECOVERY
+# =============================================================================
+
+@test "run_stage fallback extracts pr_number from result text" {
+	# No .structured_output, but .result contains PR number text
+	timeout() {
+		shift  # skip timeout value
+		echo '{"result":"Created PR #42 successfully","is_error":false}'
+	}
+	export -f timeout
+
+	local result
+	result=$(run_stage "pr" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local pr_number
+	pr_number=$(printf '%s' "$result" | jq -r '.pr_number // empty')
+	[ "$pr_number" = "42" ] || \
+		fail "Expected pr_number=42, got: $pr_number (full output: $result)"
+}
+
+@test "run_stage fallback does NOT set pr_number from bare issue ref" {
+	# A bare '#N' in an issue-reference context (e.g. 'Implemented issue #52')
+	# must not be extracted as a PR number — hash_re is intentionally absent.
+	timeout() {
+		shift  # skip timeout value
+		echo '{"result":"Implemented issue #52 on branch feature/issue-52","is_error":false}'
+	}
+	export -f timeout
+
+	local result
+	result=$(run_stage "implement" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local pr_number
+	pr_number=$(printf '%s' "$result" | jq -r '.pr_number // empty')
+	[ -z "$pr_number" ] || \
+		fail "pr_number should be empty for bare issue ref, got: $pr_number"
+}
+
+@test "run_stage fallback extracts branch from result text" {
+	# No .structured_output, but .result contains branch name
+	timeout() {
+		shift  # skip timeout value
+		echo '{"result":"Working on branch feature/issue-52 completed","is_error":false}'
+	}
+	export -f timeout
+
+	local result
+	result=$(run_stage "implement" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local branch
+	branch=$(printf '%s' "$result" | jq -r '.branch // empty')
+	[ "$branch" = "feature/issue-52" ] || \
+		fail "Expected branch=feature/issue-52, got: $branch (full output: $result)"
+}
+
+@test "run_stage fallback extracts tasks array from result text" {
+	# No .structured_output, but .result contains embedded JSON tasks array
+	local tasks_json='[{"id":1,"description":"Setup","agent":"dev"},{"id":2,"description":"Implement","agent":"dev"}]'
+	local mock_file="$TEST_TMP/tasks-mock.json"
+	jq -n --arg t "Tasks: $tasks_json" \
+		'{result: $t, is_error: false}' > "$mock_file"
+	timeout() {
+		shift  # skip timeout value
+		cat "$TEST_TMP/tasks-mock.json"
+	}
+	export -f timeout
+
+	local result
+	result=$(run_stage "parse" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local tasks_count
+	tasks_count=$(printf '%s' "$result" | jq -r 'if .tasks then (.tasks | length) else 0 end')
+	[ "$tasks_count" = "2" ] || \
+		fail "Expected 2 tasks, got: $tasks_count (full output: $result)"
+}
+
+@test "run_stage fallback with no extractable fields still succeeds" {
+	# No .structured_output, .result is plain text with no parseable fields
+	timeout() {
+		shift  # skip timeout value
+		echo '{"result":"Task completed successfully","is_error":false}'
+	}
+	export -f timeout
+
+	local result
+	result=$(run_stage "implement" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local status_val
+	status_val=$(printf '%s' "$result" | jq -r '.status')
+	[ "$status_val" = "success" ] || \
+		fail "Expected status=success, got: $status_val (full output: $result)"
+}
+
+# =============================================================================
 # TIMEOUT HANDLING
 # =============================================================================
 
 @test "run_stage returns timeout error on exit code 124" {
-    # Override timeout to simulate timeout
+    # Override timeout to simulate timeout on both initial attempt and retry
     timeout() {
+        shift  # skip timeout value
         return 124
     }
     export -f timeout
@@ -176,6 +276,39 @@ teardown() {
     run run_stage "test" "prompt" "test-schema.json"
     [ "$status" -eq 1 ]
     [[ "$output" == *"timeout"* ]]
+}
+
+@test "run_stage retries with 20% longer timeout after initial timeout" {
+    # Record which timeout values were used across calls
+    local calls_file="$TEST_TMP/timeout-calls.txt"
+    timeout() {
+        local t="$1"
+        printf '%s\n' "$t" >> "$calls_file"
+        shift  # skip timeout value
+        if [[ "$(wc -l < "$calls_file")" -eq 1 ]]; then
+            return 124  # first call: simulate timeout
+        fi
+        # second call (retry): succeed with structured output
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export calls_file
+
+    run run_stage "test" "prompt" "test-schema.json"
+    [ "$status" -eq 0 ]
+
+    # Verify two timeout calls were made
+    local call_count
+    call_count=$(wc -l < "$calls_file")
+    (( call_count == 2 )) || fail "Expected 2 timeout calls, got $call_count"
+
+    # Verify retry timeout is 20% larger than initial timeout
+    local first_timeout second_timeout expected_retry
+    first_timeout=$(sed -n '1p' "$calls_file")
+    second_timeout=$(sed -n '2p' "$calls_file")
+    expected_retry=$(( first_timeout + first_timeout / 5 ))
+    (( second_timeout == expected_retry )) || \
+        fail "Expected retry timeout ${expected_retry}s, got ${second_timeout}s"
 }
 
 # =============================================================================
@@ -280,12 +413,12 @@ teardown() {
     }
     export -f timeout
 
-    # implement defaults to opus, but S complexity overrides to sonnet
-    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S"
+    # implement defaults to opus, but M complexity overrides to sonnet
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "M"
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--model sonnet" "$claude_calls" || \
-        fail "Expected --model sonnet with S complexity. Calls: $(cat "$claude_calls")"
+        fail "Expected --model sonnet with M complexity. Calls: $(cat "$claude_calls")"
 }
 
 @test "run_stage logs model in stage output" {
@@ -314,6 +447,131 @@ teardown() {
     run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
 
     # Verify complexity was logged
-    grep -q "complexity: L" "$LOG_FILE" || \
+    grep -q "Complexity: L" "$LOG_FILE" || \
         fail "Complexity hint was not logged. Log: $(cat "$LOG_FILE")"
+}
+
+# =============================================================================
+# TIMEOUT ESCALATION — STRUCTURED OUTPUT RECOVERY ON FIRST TIMEOUT
+# =============================================================================
+
+@test "run_stage uses structured output from timed-out first call without retrying" {
+    # When the first call exits 124 but already emitted structured_output,
+    # run_stage must use it and return 0 without making a second call.
+    local calls_file="$TEST_TMP/timeout-calls.txt"
+    timeout() {
+        local t="$1"; shift
+        printf 'CALLED\n' >> "$calls_file"
+        echo '{"result":"partial","structured_output":{"status":"success","data":"early"}}'
+        return 124
+    }
+    export -f timeout
+    export calls_file
+
+    local result
+    result=$(run_stage "test" "prompt" "test-schema.json" | grep '^{')
+    [ -n "$result" ] || fail "run_stage returned no JSON output"
+
+    local status_val
+    status_val=$(printf '%s' "$result" | jq -r '.status')
+    [ "$status_val" = "success" ] || \
+        fail "Expected status=success, got: $status_val (result: $result)"
+
+    # Only one timeout call — no retry should have happened
+    local call_count
+    call_count=$(wc -l < "$calls_file")
+    (( call_count == 1 )) || \
+        fail "Expected 1 timeout call (no retry), got $call_count"
+}
+
+# =============================================================================
+# MODEL ESCALATION — error_max_turns
+# =============================================================================
+
+@test "run_stage escalates model when output subtype is error_max_turns" {
+    # BATS runs each @test in a forked subprocess — re-source model-config to
+    # make readonly arrays available (same pattern as MODEL SELECTION tests).
+    source "$TEST_TMP/model-config.sh"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" > "$TEST_TMP/call-$n-args.txt"
+        if (( n == 1 )); then
+            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file
+
+    # test-iter-1 resolves to haiku; haiku escalates to sonnet on error_max_turns
+    run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
+
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 2 )) || fail "Expected 2 claude calls, got $final_count"
+
+    # Second call must use escalated model (sonnet)
+    local second_call_args
+    second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
+    [[ "$second_call_args" == *"--model sonnet"* ]] || \
+        fail "Expected --model sonnet in escalated retry. Args: $second_call_args"
+}
+
+@test "run_stage fails with max_turns_exhausted_at_ceiling when opus hits error_max_turns" {
+    source "$TEST_TMP/model-config.sh"
+    timeout() {
+        shift; shift; shift; shift
+        # Always return error_max_turns — opus is at ceiling, cannot escalate
+        echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+    }
+    export -f timeout
+
+    # implement stage resolves to opus (ceiling model)
+    run run_stage "implement-task-1" "prompt" "test-schema.json" "" ""
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"max_turns_exhausted_at_ceiling"* ]] || \
+        fail "Expected ceiling error in output. Got: $output"
+}
+
+@test "run_stage does not include max-turns cap on error_max_turns escalation retry" {
+    source "$TEST_TMP/model-config.sh"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" > "$TEST_TMP/call-$n-args.txt"
+        if (( n == 1 )); then
+            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file
+
+    # haiku test stage gets --max-turns on first call; escalated retry must omit it
+    run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
+
+    local second_call_args
+    second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
+    [[ -n "$second_call_args" ]] || fail "No second call was made"
+    [[ "$second_call_args" != *"--max-turns"* ]] || \
+        fail "Escalated retry should not include --max-turns. Args: $second_call_args"
 }

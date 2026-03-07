@@ -860,9 +860,32 @@ run_stage() {
             printf '%s\n' "$timeout_structured"
             return 0
         fi
-        log_error "Stage $stage_name timed out after ${stage_timeout}s"
-        echo '{"status":"error","error":"timeout"}'
-        return 1
+
+        # Retry with a 20% longer timeout before giving up
+        local retry_timeout
+        retry_timeout=$(( stage_timeout + stage_timeout / 5 ))
+        log "WARN: Stage $stage_name timed out after ${stage_timeout}s — retrying with ${retry_timeout}s timeout"
+        printf '%s\n' "=== $stage_name timeout retry (${retry_timeout}s) ===" >> "$stage_log"
+
+        exit_code=0
+        output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
+            ${agent_args[@]+"${agent_args[@]}"} \
+            --model "$model" \
+            ${fallback_args[@]+"${fallback_args[@]}"} \
+            ${turns_args[@]+"${turns_args[@]}"} \
+            --dangerously-skip-permissions \
+            --output-format json \
+            --json-schema "$schema" \
+            2>&1) || exit_code=$?
+
+        printf '%s\n' "$output" >> "$stage_log"
+        printf '%s\n' "=== timeout retry exit code: $exit_code ===" >> "$stage_log"
+
+        if (( exit_code == 124 )); then
+            log_error "Stage $stage_name timed out again after ${retry_timeout}s"
+            echo '{"status":"error","error":"timeout"}'
+            return 1
+        fi
     fi
 
     # Check for max turns exhaustion — escalate to next model up and retry.
@@ -941,6 +964,66 @@ run_stage() {
 
         if [[ -n "$fallback_result" ]]; then
             log "WARNING: No .structured_output from $stage_name — using .result fallback"
+
+            # Field-aware recovery: extract known fields from .result text
+            local result_text
+            result_text=$(printf '%s' "$output" \
+                | jq -r '.result // empty' 2>/dev/null)
+
+            if [[ -n "$result_text" ]]; then
+                # Extract pr_number from "PR #N", "MR #N", or "!N"
+                # Deliberately omits bare "#N" — too ambiguous (issue refs,
+                # step counts, commit hashes) and would produce wrong PR nums.
+                local pr_re='[PpMm][Rr] *#([0-9]+)'
+                local bang_re='!([0-9]+)'
+                if [[ "$result_text" =~ $pr_re ]] \
+                    || [[ "$result_text" =~ $bang_re ]]; then
+                    local pr_num="${BASH_REMATCH[1]}"
+                    fallback_result=$(printf '%s' "$fallback_result" \
+                        | jq -c --argjson n "$pr_num" \
+                            '.pr_number = $n')
+                fi
+
+                # Extract branch from common patterns
+                local branch_re='[Bb]ranch[: ]+([a-zA-Z0-9/_.-]+)'
+                if [[ "$result_text" =~ $branch_re ]]; then
+                    local br="${BASH_REMATCH[1]}"
+                    fallback_result=$(printf '%s' "$fallback_result" \
+                        | jq -c --arg b "$br" \
+                            '.branch = $b')
+                fi
+
+                # Extract tasks JSON array embedded in text using a
+                # balanced-bracket parser so nested arrays (e.g. a
+                # "dependencies" field) are not truncated at their first ']'.
+                local tasks_match
+                tasks_match=$(python3 -c "
+import sys, re
+t = sys.stdin.read()
+for m in re.finditer(r'\[\s*\{', t):
+    s = m.start()
+    d = 0
+    for i, c in enumerate(t[s:], s):
+        if c == '[': d += 1
+        elif c == ']':
+            d -= 1
+            if d == 0:
+                print(t[s:i+1])
+                break
+    break" <<< "$result_text" 2>/dev/null)
+                if [[ -n "$tasks_match" ]]; then
+                    local valid_tasks
+                    valid_tasks=$(printf '%s' "$tasks_match" \
+                        | jq -c 'if type == "array" then . else empty end' \
+                            2>/dev/null)
+                    if [[ -n "$valid_tasks" ]]; then
+                        fallback_result=$(printf '%s' "$fallback_result" \
+                            | jq -c --argjson t "$valid_tasks" \
+                                '.tasks = $t')
+                    fi
+                fi
+            fi
+
             printf '%s\n' "$fallback_result"
             return 0
         fi
@@ -2306,6 +2389,12 @@ $task_list_md
             local review_attempts=0
             local task_succeeded=false
 
+            # Get base timeout and model for graduated retry
+            local base_timeout
+            base_timeout=$(get_stage_timeout "implement-task-$task_id")
+            local base_model
+            base_model=$(resolve_model "implement-task-$task_id" "$task_size")
+
             while (( review_attempts < max_attempts )); do
                 review_attempts=$((review_attempts + 1))
 
@@ -2323,8 +2412,24 @@ After implementing, verify your changes against the task description above:
 Only commit when you are confident the task goal is achieved.
 Commit your changes with a descriptive message."
 
+                # On retry after first failure: escalate model and increase timeout by 20%
+                local current_timeout="$base_timeout"
+                local current_model=""
+                if (( review_attempts > 1 )); then
+                    # Graduated retry: use next model up and 20% increased timeout
+                    current_model=$(_next_model_up "$base_model")
+                    current_timeout=$((base_timeout * 120 / 100))
+                    log "Task $task_id retry: escalating to $current_model with timeout ${current_timeout}s"
+                fi
+
                 local impl_result
-                impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent" "$task_size")
+                if [[ -n "$current_model" ]]; then
+                    # Pass escalated model and increased timeout
+                    impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent" "$task_size" "$current_timeout" "$current_model")
+                else
+                    # First attempt: use defaults
+                    impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent" "$task_size")
+                fi
 
                 local impl_status
                 impl_status=$(printf '%s' "$impl_result" | jq -r '.status')
@@ -2670,11 +2775,17 @@ The command will output the MR number. Use that as pr_number in your response."
             log_warn "PR number missing or invalid from structured output (got: '$pr_number') — recovering via find-mr.sh"
             pr_number=$("$PLATFORM_DIR/find-mr.sh" --branch "$branch" 2>/dev/null || true)
             if [[ -z "$pr_number" || "$pr_number" == "null" ]]; then
-                log_error "Could not recover PR/MR number from find-mr.sh for branch '$branch'"
-                set_final_state "error"
-                exit 1
+                log_warn "find-mr.sh recovery failed — trying gh pr list fallback"
+                pr_number=$(gh pr list --head "$branch" --json number -q '.[0].number' 2>/dev/null || true)
+                if [[ -z "$pr_number" || "$pr_number" == "null" ]]; then
+                    log_error "Could not recover PR/MR number from find-mr.sh or gh pr list for branch '$branch'"
+                    set_final_state "error"
+                    exit 1
+                fi
+                log "Recovered PR/MR #$pr_number from gh pr list"
+            else
+                log "Recovered PR/MR #$pr_number from find-mr.sh"
             fi
-            log "Recovered PR/MR #$pr_number from find-mr.sh"
         fi
 
         log "PR #$pr_number created/updated"
