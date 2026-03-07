@@ -963,3 +963,80 @@ teardown() {
 
     [[ "$script_content" == *'PLATFORM_DIR="$SCRIPT_DIR/platform"'* ]]
 }
+
+# =============================================================================
+# GRADUATED RETRY — task implementation escalates model + timeout on failure
+# =============================================================================
+
+@test "implement loop captures base_timeout and base_model before retry loop" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # Must resolve base values once, outside the while loop
+    [[ "$main_def" == *"base_timeout"* ]]
+    [[ "$main_def" == *"base_model"* ]]
+    [[ "$main_def" == *'get_stage_timeout'* ]]
+    [[ "$main_def" == *'resolve_model'* ]]
+}
+
+@test "implement loop uses _next_model_up for model escalation on retry" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *'_next_model_up "$base_model"'* ]]
+}
+
+@test "implement loop increases timeout by 20 percent on retry" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # 20% increase: base * 120 / 100
+    [[ "$main_def" == *'120 / 100'* ]]
+    [[ "$main_def" == *'current_timeout'* ]]
+}
+
+@test "implement loop passes model_override to run_stage on retry" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # run_stage must be called with current_model as 7th arg on retry
+    [[ "$main_def" == *'"$current_model"'* ]]
+}
+
+@test "implement loop passes timeout_override to run_stage on retry" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # run_stage must be called with current_timeout as 6th arg on retry
+    [[ "$main_def" == *'"$current_timeout"'* ]]
+}
+
+@test "implement loop logs escalation message on retry" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"escalating to"* ]]
+}
+
+@test "implement loop only escalates after first attempt" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # Gate on review_attempts > 1 (not >= 1)
+    [[ "$main_def" == *'review_attempts > 1'* ]]
+}
+
+@test "20 percent timeout increase arithmetic is correct" {
+    # Verify bash integer math gives correct 20% increase
+    local base=1800
+    local increased=$((base * 120 / 100))
+    [ "$increased" -eq 2160 ]
+
+    local base2=900
+    local increased2=$((base2 * 120 / 100))
+    [ "$increased2" -eq 1080 ]
+
+    local base3=300
+    local increased3=$((base3 * 120 / 100))
+    [ "$increased3" -eq 360 ]
+}

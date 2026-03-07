@@ -2366,6 +2366,12 @@ $task_list_md
             local review_attempts=0
             local task_succeeded=false
 
+            # Get base timeout and model for graduated retry
+            local base_timeout
+            base_timeout=$(get_stage_timeout "implement-task-$task_id")
+            local base_model
+            base_model=$(resolve_model "implement-task-$task_id" "$task_size")
+
             while (( review_attempts < max_attempts )); do
                 review_attempts=$((review_attempts + 1))
 
@@ -2383,8 +2389,24 @@ After implementing, verify your changes against the task description above:
 Only commit when you are confident the task goal is achieved.
 Commit your changes with a descriptive message."
 
+                # On retry after first failure: escalate model and increase timeout by 20%
+                local current_timeout="$base_timeout"
+                local current_model=""
+                if (( review_attempts > 1 )); then
+                    # Graduated retry: use next model up and 20% increased timeout
+                    current_model=$(_next_model_up "$base_model")
+                    current_timeout=$((base_timeout * 120 / 100))
+                    log "Task $task_id retry: escalating to $current_model with timeout ${current_timeout}s"
+                fi
+
                 local impl_result
-                impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent" "$task_size")
+                if [[ -n "$current_model" ]]; then
+                    # Pass escalated model and increased timeout
+                    impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent" "$task_size" "$current_timeout" "$current_model")
+                else
+                    # First attempt: use defaults
+                    impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent" "$task_size")
+                fi
 
                 local impl_status
                 impl_status=$(printf '%s' "$impl_result" | jq -r '.status')
