@@ -2781,6 +2781,20 @@ Investigate the root cause and fix the issue. Commit your changes."
     fi
 
     # -------------------------------------------------------------------------
+    # Pre-compute modified TypeScript files before docs stage
+    # -------------------------------------------------------------------------
+    local modified_ts_files
+    modified_ts_files=$(git diff "$BASE_BRANCH"...HEAD --name-only -- '*.ts' '*.tsx' 2>/dev/null | grep -E '^(apps|packages)/' | sort)
+
+    # Format the file list for the prompt
+    local files_for_prompt
+    if [[ -n "$modified_ts_files" ]]; then
+        files_for_prompt=$(printf '%s' "$modified_ts_files" | sed 's/^/- /')
+    else
+        files_for_prompt="(no TypeScript files modified)"
+    fi
+
+    # -------------------------------------------------------------------------
     # STAGE: DOCS
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "docs"; then
@@ -2801,7 +2815,8 @@ Investigate the root cause and fix the issue. Commit your changes."
 
             local docs_prompt="Write JSDoc/TSDoc comments for all modified TypeScript files on branch $branch in the current working directory.
 
-Get modified files with: git diff $BASE_BRANCH...HEAD --name-only -- '*.ts' '*.tsx' | grep -E '^(apps|packages)/'
+Modified TypeScript files:
+$files_for_prompt
 
 Add comprehensive JSDoc/TSDoc comments and commit with message: docs(issue-$ISSUE_NUMBER): add JSDoc comments"
             run_stage "docs" "$docs_prompt" "implement-issue-implement.json" "default"
