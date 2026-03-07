@@ -26,10 +26,11 @@ PLATFORM_DIR="$SCRIPT_DIR/platform"
 
 # Timeouts and limits
 readonly MAX_QUALITY_ITERATIONS=5
-readonly MAX_TEST_ITERATIONS=10
+readonly MAX_TEST_ITERATIONS=7
 # Cap at 2: merged spec+code review per iteration makes each pass thorough
 # enough that a 3rd iteration rarely finds new issues, while saving ~15 min.
 readonly MAX_PR_REVIEW_ITERATIONS=2
+readonly MAX_VALIDATION_FIX_ITERATIONS=2
 readonly RATE_LIMIT_BUFFER=60
 readonly RATE_LIMIT_DEFAULT_WAIT=3600
 
@@ -1486,6 +1487,47 @@ detect_change_scope() {
     return 0
 }
 
+# Checks whether every failure in a JSON failures array is caused by an
+# environment infrastructure error (Redis, database connection, HTTP 500,
+# network timeouts, etc.) rather than a code-level defect.
+#
+# When ALL failures are environment-related, dispatching a fix agent is
+# pointless — no code change can resolve infrastructure unavailability.
+#
+# Arguments:
+#   $1 - JSON array of failure objects with "test" and "message" fields
+# Returns:
+#   0 if every failure matches an environment pattern (skip fix dispatch)
+#   1 if any failure is code-level (fix dispatch should proceed)
+all_failures_environment_related() {
+	local failures_json="$1"
+	local count
+	count=$(printf '%s' "$failures_json" \
+		| jq 'length // 0' 2>/dev/null || echo 0)
+	if (( count == 0 )); then
+		return 1
+	fi
+	# Count failures whose message does NOT match any known environment-error
+	# pattern.  If that count is zero every failure is an infrastructure issue
+	# and we should skip the fix agent.  Only the message field is checked —
+	# matching the test name would cause false positives for tests whose names
+	# happen to contain infrastructure keywords (e.g. "redis-retry-logic").
+	local non_env_count
+	local env_pattern
+	env_pattern='redis|ECONNREFUSED|connection refused|HTTP 500'
+	env_pattern+='|database connection|socket hang up'
+	env_pattern+='|ETIMEDOUT|ENOTFOUND|connect timeout|ECONNRESET'
+	non_env_count=$(printf '%s' "$failures_json" \
+		| jq --arg pat "$env_pattern" '
+			[.[] | select(
+				((.message // ""))
+				| test($pat; "i")
+				| not
+			)] | length
+		' 2>/dev/null || echo 1)
+	(( non_env_count == 0 ))
+}
+
 # Run the test loop (test+validate -> fix, repeat until pass)
 # Called once after all tasks complete
 # Flow:
@@ -1510,6 +1552,7 @@ run_test_loop() {
 
     local loop_complete=false
     local test_iteration=0
+    local validation_fix_iteration=0
 
     log "Starting test loop after all tasks complete"
 
@@ -1802,13 +1845,33 @@ $test_summary" "default"
                 break
             fi
 
-            # Convergence detection: exit early if same PR-scoped failures repeat 3 times
+            # Skip fix agent when every remaining failure is an environment
+            # infrastructure error (Redis, DB, HTTP 500, network timeouts).
+            # Code changes cannot resolve infrastructure unavailability, so
+            # dispatching a fix agent would waste iterations and tokens.
+            if all_failures_environment_related "$pr_failures"; then
+                log "INFO: All failures are environment-related." \
+                    "Skipping fix-agent dispatch."
+                local env_title="Test Loop: Environment Errors"
+                env_title+=" ($test_iteration/$MAX_TEST_ITERATIONS)"
+                local env_body
+                env_body="ℹ️ All test failures appear to be"
+                env_body+=" environment-related (Redis/DB connection"
+                env_body+=" errors, HTTP 500, network timeouts)."
+                env_body+=" These require infrastructure fixes, not code"
+                env_body+=" changes. Skipping fix-agent."
+                comment_issue "$env_title" "$env_body" "default"
+                loop_complete=true
+                break
+            fi
+
+            # Convergence detection: exit early if same PR-scoped failures repeat 2 times
             local failure_sig
             failure_sig=$(printf '%s' "$pr_failures" | md5sum | cut -d' ' -f1)
             prior_failure_sigs="${prior_failure_sigs} ${failure_sig}"
             local sig_count
             sig_count=$(printf '%s' "$prior_failure_sigs" | tr ' ' '\n' | grep -c "^${failure_sig}$" || true)
-            if (( sig_count >= 3 )); then
+            if (( sig_count >= 2 )); then
                 log_warn "Test-fix convergence failure: same failures repeated $sig_count times. Exiting loop."
                 comment_issue "Test Loop: Convergence Failure" "⚠️ Same test failures repeated $sig_count times. Aborting test-fix loop to prevent waste.
 
@@ -1855,6 +1918,14 @@ $test_summary" "default"
             log "Test loop complete on iteration $test_iteration (tests passed, validation: $validate_status)"
         else
             # Validation failed — fix quality issues
+            validation_fix_iteration=$((validation_fix_iteration + 1))
+
+            if (( validation_fix_iteration > MAX_VALIDATION_FIX_ITERATIONS )); then
+                log_error "Validation fix loop exceeded max iterations ($MAX_VALIDATION_FIX_ITERATIONS)"
+                set_final_state "max_iterations_validation_fix"
+                exit 2
+            fi
+
             comment_issue "Test Loop: Results ($test_iteration/$MAX_TEST_ITERATIONS)" "✅ **Tests:** passed
 🔄 **Validation:** $validate_status
 
@@ -1862,7 +1933,7 @@ $test_summary
 
 $validate_summary" "default"
 
-            log "Test validation found issues. Fixing..."
+            log "Test validation found issues. Fixing... (validation fix iteration $validation_fix_iteration/$MAX_VALIDATION_FIX_ITERATIONS)"
             local validate_issues
             validate_issues=$(printf '%s' "$test_result" | jq -r '
                 if .validation_issues then (.validation_issues | tostring)
@@ -1874,6 +1945,8 @@ $validate_summary" "default"
             local fix_prompt="Address test quality issues in working directory $safe_dir on branch $loop_branch:
 
 $validate_issues
+
+SCOPE CONSTRAINT: Only fix quality issues in test files that correspond to PR-changed implementation files. Do not modify tests for unrelated implementation files.
 
 Fix the test quality issues (add missing assertions, remove TODOs, add edge case tests, etc.) and commit.
 Output a summary of fixes applied."
