@@ -211,6 +211,7 @@ fi
 
 LOG_FILE=""
 STAGE_COUNTER=0
+_CONSECUTIVE_TIMEOUTS=0
 
 log() {
     local msg="[$(date -Iseconds)] $*"
@@ -571,6 +572,7 @@ fi
 mkdir -p "$LOG_BASE/stages" "$LOG_BASE/context"
 LOG_FILE="$LOG_BASE/orchestrator.log"
 STAGE_COUNTER=0
+_CONSECUTIVE_TIMEOUTS=0
 
 # =============================================================================
 # STATUS SYNC TO LOG DIRECTORY
@@ -770,6 +772,7 @@ run_stage() {
     # Validate schema file exists
     if [[ ! -f "$SCHEMA_DIR/$schema_file" ]]; then
         log_error "Schema file not found: $SCHEMA_DIR/$schema_file"
+        _CONSECUTIVE_TIMEOUTS=0
         echo '{"status":"error","error":"schema not found"}'
         return 1
     fi
@@ -897,6 +900,12 @@ run_stage() {
 
         if (( exit_code == 124 )); then
             log_error "Stage $stage_name timed out again after ${retry_timeout}s"
+            (( _CONSECUTIVE_TIMEOUTS++ )) || true
+            if (( _CONSECUTIVE_TIMEOUTS >= 2 )); then
+                log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS" \
+                    "consecutive stage(s) timed out." \
+                    "Consider increasing the stage timeout or reducing task complexity."
+            fi
             echo '{"status":"error","error":"timeout"}'
             return 1
         fi
@@ -1051,10 +1060,12 @@ for m in re.finditer(r'\[\s*\{', t):
         log "Diagnostic fallback failure — First 500 characters: $output_preview"
 
         log_error "No structured output from $stage_name"
+        _CONSECUTIVE_TIMEOUTS=0
         echo '{"status":"error","error":"no structured output"}'
         return 1
     fi
 
+    _CONSECUTIVE_TIMEOUTS=0
     printf '%s\n' "$structured"
 }
 

@@ -17,6 +17,7 @@ setup() {
     export LOG_BASE="$TEST_TMP/logs/test"
     export LOG_FILE="$LOG_BASE/orchestrator.log"
     export STAGE_COUNTER=0
+    export _CONSECUTIVE_TIMEOUTS=0
     export SCHEMA_DIR="$TEST_TMP/schemas"
 
     mkdir -p "$LOG_BASE/stages" "$LOG_BASE/context"
@@ -309,6 +310,127 @@ teardown() {
     expected_retry=$(( first_timeout + first_timeout / 5 ))
     (( second_timeout == expected_retry )) || \
         fail "Expected retry timeout ${expected_retry}s, got ${second_timeout}s"
+}
+
+# =============================================================================
+# CASCADE TIMEOUT DETECTION
+# =============================================================================
+
+@test "cascade timeout: counter increments after definitive timeout" {
+	timeout() {
+		shift  # skip timeout value
+		return 124  # always timeout (both initial and retry)
+	}
+	export -f timeout
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "test-stage" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+	[ "$_CONSECUTIVE_TIMEOUTS" -eq 1 ] || \
+		fail "Expected counter=1 after one timeout, got $_CONSECUTIVE_TIMEOUTS"
+}
+
+@test "cascade timeout: no warning after single timeout" {
+	timeout() {
+		shift  # skip timeout value
+		return 124  # always timeout
+	}
+	export -f timeout
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "test-stage" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+
+	! grep -q "Cascade timeout detected" "$LOG_FILE" || \
+		fail "Should not warn after single timeout. Log: $(cat "$LOG_FILE")"
+}
+
+@test "cascade timeout: warning logged after 2 consecutive timeouts" {
+	timeout() {
+		shift  # skip timeout value
+		return 124  # always timeout
+	}
+	export -f timeout
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "stage-1" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+	run_stage "stage-2" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+
+	grep -q "Cascade timeout detected" "$LOG_FILE" || \
+		fail "Expected cascade warning in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "cascade timeout: warning includes actionable suggestion" {
+	timeout() {
+		shift  # skip timeout value
+		return 124  # always timeout
+	}
+	export -f timeout
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "stage-1" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+	run_stage "stage-2" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+
+	grep -q "increasing the stage timeout\|task complexity" "$LOG_FILE" || \
+		fail "Expected suggestion in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "cascade timeout: counter resets to 0 after successful stage" {
+	local calls_file="$TEST_TMP/cascade-calls.txt"
+	printf '0' > "$calls_file"
+	timeout() {
+		local n
+		n=$(cat "$calls_file")
+		n=$((n + 1))
+		printf '%s' "$n" > "$calls_file"
+		shift  # skip timeout value
+		if (( n <= 2 )); then
+			# First two calls: initial attempt + retry for stage-1
+			return 124
+		fi
+		echo '{"result":"ok","structured_output":{"status":"success"}}'
+	}
+	export -f timeout
+	export calls_file
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "stage-1" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+	# counter = 1 after stage-1 definitively times out
+	run_stage "stage-2" "prompt" "test-schema.json" >/dev/null 2>/dev/null
+	# counter should be reset to 0 after stage-2 succeeds
+	[ "$_CONSECUTIVE_TIMEOUTS" -eq 0 ] || \
+		fail "Expected counter=0 after success, got $_CONSECUTIVE_TIMEOUTS"
+}
+
+@test "cascade timeout: counter stays 0 when initial timeout recovers" {
+	# A timeout that recovers (structured output extracted from first attempt)
+	# should NOT increment the counter — it did not definitively time out.
+	local calls_file="$TEST_TMP/recover-calls.txt"
+	printf '0' > "$calls_file"
+	timeout() {
+		local n
+		n=$(cat "$calls_file")
+		n=$((n + 1))
+		printf '%s' "$n" > "$calls_file"
+		shift  # skip timeout value
+		# Return structured output AND exit 124 — simulates early-output timeout
+		echo '{"result":"partial","structured_output":{"status":"success"}}'
+		return 124
+	}
+	export -f timeout
+	export calls_file
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "stage-1" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null
+	# Only one call made (early-output recovery), counter stays at 0
+	[ "$_CONSECUTIVE_TIMEOUTS" -eq 0 ] || \
+		fail "Expected counter=0 on recovery, got $_CONSECUTIVE_TIMEOUTS"
 }
 
 # =============================================================================

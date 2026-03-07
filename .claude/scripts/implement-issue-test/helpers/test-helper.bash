@@ -329,6 +329,9 @@ HEADER
         # Skip STAGE_COUNTER init (set in test defaults)
         /^STAGE_COUNTER=0$/ { next }
 
+        # Skip _CONSECUTIVE_TIMEOUTS init (set in test defaults)
+        /^_CONSECUTIVE_TIMEOUTS=0$/ { next }
+
         # Skip main invocation
         /^main "\$@"$/ { next }
 
@@ -356,6 +359,7 @@ STATUS_FILE="${STATUS_FILE:-status.json}"
 LOG_BASE="${LOG_BASE:-logs/test}"
 LOG_FILE="${LOG_FILE:-$LOG_BASE/orchestrator.log}"
 STAGE_COUNTER="${STAGE_COUNTER:-0}"
+_CONSECUTIVE_TIMEOUTS="${_CONSECUTIVE_TIMEOUTS:-0}"
 QUIET="${QUIET:-false}"
 EOF
 
