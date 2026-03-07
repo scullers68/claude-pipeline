@@ -130,11 +130,11 @@ teardown() {
 	[ "$status" -eq 0 ]
 }
 
-@test "pattern found in test name field also counts" {
+@test "env keyword in test name alone does not count (message-only matching)" {
 	local failures
 	failures='[{"test":"redis.cluster.failover","message":"unexpected cluster state"}]'
 	run all_failures_environment_related "$failures"
-	[ "$status" -eq 0 ]
+	[ "$status" -eq 1 ]
 }
 
 # =============================================================================
@@ -195,7 +195,7 @@ teardown() {
 
 @test "handles failures with missing message field gracefully" {
 	local failures='[{"test":"no-message-here"}]'
-	# no message field — only test name checked; no env pattern in name
+	# no message field — message defaults to ""; no env pattern matches
 	run all_failures_environment_related "$failures"
 	[ "$status" -eq 1 ]
 }

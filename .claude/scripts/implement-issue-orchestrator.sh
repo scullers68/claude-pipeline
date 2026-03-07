@@ -1507,9 +1507,11 @@ all_failures_environment_related() {
 	if (( count == 0 )); then
 		return 1
 	fi
-	# Count failures whose combined test+message does NOT match any known
-	# environment-error pattern.  If that count is zero every failure is an
-	# infrastructure issue and we should skip the fix agent.
+	# Count failures whose message does NOT match any known environment-error
+	# pattern.  If that count is zero every failure is an infrastructure issue
+	# and we should skip the fix agent.  Only the message field is checked —
+	# matching the test name would cause false positives for tests whose names
+	# happen to contain infrastructure keywords (e.g. "redis-retry-logic").
 	local non_env_count
 	local env_pattern
 	env_pattern='redis|ECONNREFUSED|connection refused|HTTP 500'
@@ -1518,7 +1520,7 @@ all_failures_environment_related() {
 	non_env_count=$(printf '%s' "$failures_json" \
 		| jq --arg pat "$env_pattern" '
 			[.[] | select(
-				((.message // "") + " " + (.test // ""))
+				((.message // ""))
 				| test($pat; "i")
 				| not
 			)] | length
