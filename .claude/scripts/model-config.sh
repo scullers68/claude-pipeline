@@ -42,7 +42,7 @@ _stage_to_tier() {
 	case "$1" in
 		parse-issue)    printf '%s' "light" ;;
 		validate-plan)  printf '%s' "light" ;;
-		implement)      printf '%s' "advanced" ;;
+		implement)      printf '%s' "standard" ;;
 		task-review)    printf '%s' "standard" ;;
 		fix)            printf '%s' "standard" ;;
 		test)           printf '%s' "light" ;;
@@ -70,12 +70,12 @@ _stage_to_tier() {
 # =============================================================================
 #
 # Task complexity hints (S/M/L) from issue parsing override stage defaults.
-# The quality loop forwards these to implement, simplify, review, and fix stages.
+# The quality loop forwards these to implement, review, and fix stages.
 #
 
 _complexity_to_tier() {
 	case "$1" in
-		S) printf '%s' "light" ;;
+		S) printf '%s' "standard" ;;
 		M) printf '%s' "standard" ;;
 		L) printf '%s' "advanced" ;;
 		*) printf '%s' "" ;;
