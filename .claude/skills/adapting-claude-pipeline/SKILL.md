@@ -204,6 +204,54 @@ Context size compounds across every message in every conversation. Audit these d
 - [ ] No technology-specific checklists in agent definitions (put in stage-specific prompts, loaded once per invocation)
 - [ ] Rarely-used CLAUDE.md sections moved to separate files that are read on-demand
 
+### CLAUDE.md Size Management
+
+CLAUDE.md is loaded into every message in every conversation. Bloat here multiplies cost and latency across the entire project lifetime.
+
+**Target size: under 2KB** (~200 lines maximum).
+
+#### What belongs in CLAUDE.md
+
+Only content that must be visible on every message:
+
+| Content type | Examples |
+|---|---|
+| Run commands | `npm run dev`, `./scripts/deploy-local.sh`, test commands |
+| Ports & URLs | `localhost:3000`, staging URL, prod URL |
+| Credentials & env | Required env vars, secrets location, API key sources |
+| Key constraints | "Never force-push main", "always squash-merge", "no debug code in prod" |
+| Active issue notes | Short reminders about current bugs or in-progress work (clear when resolved) |
+
+#### What belongs in linked files
+
+Move verbose content out of CLAUDE.md and reference it by path:
+
+| Content type | Where to put it |
+|---|---|
+| API docs, endpoint lists | `.claude/prompts/api-reference.md` |
+| Skill descriptions | Individual skill SKILL.md files |
+| Agent authorities & anti-patterns | Individual agent files |
+| Setup cost components | `.claude/prompts/setup-costs.md` or similar |
+| Water/resource requirements | `.claude/prompts/requirements.md` |
+| Architecture diagrams or specs | `docs/architecture.md` |
+| Long testing instructions | `.claude/prompts/testing-guide.md` |
+
+Reference these in CLAUDE.md with a single line: `- See .claude/prompts/api-reference.md for endpoint list`
+
+#### Migration Checklist for Existing Projects
+
+When adapting a project that already has a bloated CLAUDE.md:
+
+- [ ] Measure current size: `wc -c CLAUDE.md` — target under 2048 bytes
+- [ ] Identify sections that are never read mid-conversation (architecture docs, full requirement lists, long API references)
+- [ ] Move each verbose section to an appropriately named file under `.claude/prompts/`
+- [ ] Replace each moved section with a one-line reference in CLAUDE.md
+- [ ] Remove resolved issue notes (e.g., "bug #79 not fixed") — these belong in GitHub Issues, not CLAUDE.md
+- [ ] Remove duplicate content already covered in skill/agent files
+- [ ] Verify commands, ports, credentials, and constraints remain in CLAUDE.md
+- [ ] Re-measure: `wc -c CLAUDE.md` — confirm under 2KB
+- [ ] Do a smoke test: open a new conversation and verify Claude still has the context it needs
+
 ### Phase 4: Write the Plan
 
 **REQUIRED:** Use the `writing-plans` skill.
