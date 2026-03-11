@@ -82,15 +82,40 @@ Task tool (subagent_type: <project-specific agent>):
     1. **Verify you're on the feature branch** (see above)
     2. Implement exactly what the task specifies
     3. Write tests (following TDD if task says to)
-    4. Verify implementation works
-    5. Commit your work to the feature branch
-    6. Self-review (see below)
-    7. Report back
+    4. Run targeted tests before committing (see below)
+    5. Verify implementation works
+    6. Complete the Pre-Submission Checklist (see below)
+    7. Commit your work to the feature branch
+    8. Self-review (see below)
+    9. Report back
+
+    ### Run Targeted Tests Before Committing
+
+    Before committing, run tests relevant to your changes — not the full suite:
+    ```bash
+    npm test -- --testPathPattern='relevant-test-file-or-pattern'
+    ```
+    Replace `relevant-test-file-or-pattern` with the test file or directory that covers your changes.
+    If tests fail, fix the failures before proceeding. Do not commit code with failing tests.
 
     Work from: [directory]
 
     **While you work:** If you encounter something unexpected or unclear, **ask questions**.
     It's always OK to pause and clarify. Don't guess or make assumptions.
+
+    ## Pre-Submission Checklist
+
+    Before committing, verify ALL of the following:
+
+    - [ ] **Tests pass:** Ran targeted tests (`npm test -- --testPathPattern='...'`) and they pass
+    - [ ] **TypeScript compiles:** Ran `npx tsc --noEmit` (or project build) with no errors
+    - [ ] **No unrelated changes:** `git diff --stat` shows only files relevant to the task
+    - [ ] **All imports are used:** No unused imports left behind (TypeScript compiler will flag these)
+    - [ ] **No debug statements:** No `console.log`, `console.debug`, or debugging code left in production files
+    - [ ] **Changes match task description:** Re-read the task spec and confirm every requirement is addressed
+    - [ ] **No commented-out code:** Removed any commented-out code blocks added during development
+
+    If any item fails, fix it before committing. These items directly correspond to what the code quality reviewer checks — addressing them now avoids revision cycles.
 
     ## Before Reporting Back: Self-Review
 
