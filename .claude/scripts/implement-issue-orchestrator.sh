@@ -2177,6 +2177,38 @@ create_task_worktree() {
 		return 1
 	fi
 
+	# Write stage-level excludes so agents cannot accidentally
+	# commit large binary or data files.  Uses the worktree's
+	# own info/exclude (not tracked, not committed).
+	local wt_git_dir
+	wt_git_dir=$(git -C "$wt_path" \
+		rev-parse --git-dir 2>/dev/null)
+	if [[ -n "$wt_git_dir" ]]; then
+		mkdir -p "$wt_git_dir/info"
+		cat >> "$wt_git_dir/info/exclude" <<'STAGE_EXCLUDES'
+# Stage-level excludes — added by orchestrator, not committed.
+.silo-downloads/
+*.db
+*.sqlite
+*.sqlite3
+*.bin
+*.zip
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.whl
+*.egg-info/
+*.pyc
+__pycache__/
+*.so
+*.o
+*.a
+*.dylib
+*.dll
+*.exe
+STAGE_EXCLUDES
+	fi
+
 	printf '%s' "$wt_path"
 }
 
@@ -2265,6 +2297,10 @@ After implementing, verify your changes against the task description above:
 3. If you find problems, fix them before committing.
 
 Only commit when you are confident the task goal is achieved.
+When committing: run 'git diff --name-only' to list the files
+you changed, then 'git add' only those specific files. Never
+use 'git add -A' or 'git add .' — only stage files the task
+actually modified.
 Commit your changes with a descriptive message."
 
 		local current_timeout="$base_timeout"
