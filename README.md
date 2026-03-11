@@ -1,4 +1,4 @@
-# Claude Pipeline (stevegrocott fork)
+# Claude Pipeline
 
 > Forked from [aaddrick/claude-pipeline](https://github.com/aaddrick/claude-pipeline) — a portable `.claude/` folder for structured Claude Code development workflows.
 
