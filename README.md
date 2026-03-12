@@ -212,8 +212,9 @@ Each stage type has a tuned timeout instead of a flat default:
 
 [claude-spend](https://github.com/stevegrocott/claude-spend) is a companion dashboard that visualises your Claude Code token usage. When used alongside claude-pipeline, it parses orchestrator logs to surface pipeline-specific analytics that go beyond basic token counting.
 
-```
-npx claude-spend
+```bash
+git clone https://github.com/stevegrocott/claude-spend.git
+cd claude-spend && npm start
 ```
 
 ### How they work together
