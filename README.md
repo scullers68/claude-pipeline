@@ -120,11 +120,22 @@ handle-issues (skill) → batch-orchestrator.sh
 - **Fuzzy task parsing** — handles missing backticks, asterisk bullets, leading whitespace, and missing square brackets with warnings
 - **Task batching** — tasks with non-overlapping file sets are grouped into parallel batches; tasks sharing files run sequentially
 - **Worktree parallelism** — parallel batches execute in isolated git worktrees and merge back
-- **Pipeline profiles** — classifies issues as minimal/standard/full based on task count and complexity
+- **Pipeline profiles** — classifies issues as minimal/standard/full based on task count and complexity (see table below)
 - **Smart test targeting** — runs only tests related to changed files; detects convergence (repeated identical failures) and breaks loops
-- **Model escalation** — each stage has a fallback model one tier up (haiku→sonnet→opus) for resilience
-- **Metrics export** — tracks quality iterations, test iterations, PR review iterations, and escalations
+- **Model escalation** — each stage has a fallback model one tier up (haiku→sonnet→opus) for resilience; double-timeout triggers automatic escalation
+- **Metrics export** — tracks quality iterations, test iterations, PR review iterations, and escalations; feeds into [claude-spend](#spend-analysis-with-claude-spend)
+- **Binary file sanitization** — scans commits for accidentally staged binary/data files and removes them before pushing
 - **Resume support** — can resume from any stage after interruption
+
+### Pipeline Profiles
+
+The orchestrator classifies each run into a profile based on task complexity, then adjusts iteration limits accordingly:
+
+| Profile | Trigger | Quality Loop | Test Loop | PR Review |
+|---------|---------|-------------|-----------|-----------|
+| **minimal** | Single S-task or diff < 20 lines | capped | 2 iterations max | 1 iteration |
+| **standard** | Multiple S-tasks, diff ≥ 20 lines | default | default | default |
+| **full** | Any M or L task present | up to 5 iterations | up to 7 iterations | up to 2 iterations |
 
 ### Skill Categories
 
@@ -149,6 +160,96 @@ The pipeline uses a three-tier model abstraction (`model-config.sh`) that decoup
 | **advanced** | opus | Deep reasoning: complex implementation (L-complexity tasks), unknown stages |
 
 Task complexity hints (`S`/`M`/`L`) from issue parsing override stage defaults — S and M use sonnet, L uses opus. Light-tier stages always use haiku regardless of complexity.
+
+## Orchestrator Features
+
+### Timeout Escalation
+
+When a stage times out twice at the same model tier, the orchestrator automatically escalates to the next model up (e.g. Haiku → Sonnet → Opus). This prevents stuck stages from blocking the pipeline while keeping costs low for stages that complete normally.
+
+### Fuzzy Task Parsing
+
+The task parser handles common malformations in issue bodies:
+
+```markdown
+# All of these parse correctly:
+- [ ] `[backend-developer]` Canonical format
+- [ ] [backend-developer] Missing backticks
+* [ ] `[backend-developer]` Asterisk bullet
+  - [ ] `[backend-developer]` Leading whitespace
+- [ ] `backend-developer` Missing square brackets
+```
+
+Tasks without a complexity hint default to **M** (medium).
+
+### Binary File Sanitization
+
+After each task implementation, the orchestrator scans commits for accidentally staged binary and data files (images, archives, database files, lock files) and removes them before pushing. Prevents bloating the repository with unintended artifacts.
+
+### Metrics Export
+
+At orchestrator completion, `metrics.json` is emitted to the log directory with structured data about the run: stage timings, model usage, escalations, iteration counts, and final status. This is the data that [claude-spend](#spend-analysis-with-claude-spend) parses for its pipeline analytics.
+
+### Parallel E2E & Acceptance Testing
+
+The `e2e-verify` and `acceptance-test` stages run concurrently using bash background jobs. Both must pass, but running them in parallel reduces wall-clock time.
+
+### Per-Stage Timeouts
+
+Each stage type has a tuned timeout instead of a flat default:
+
+| Stage | Timeout |
+|-------|---------|
+| implement, fix | 30 min |
+| pr-review | 30 min |
+| task-review | 15 min |
+| test-iter | 15 min |
+| deploy-verify, fix-e2e | 15 min |
+| e2e-verify | 10 min |
+| test, docs, pr | 10 min |
+
+## Spend Analysis with claude-spend
+
+[claude-spend](https://github.com/stevegrocott/claude-spend) is a companion dashboard that visualises your Claude Code token usage. When used alongside claude-pipeline, it parses orchestrator logs to surface pipeline-specific analytics that go beyond basic token counting.
+
+```
+npx claude-spend
+```
+
+### How they work together
+
+claude-pipeline writes structured logs to `logs/implement-issue/<timestamp>/` during each run. claude-spend scans these log directories and correlates them with Claude Code session data to produce pipeline-aware analytics.
+
+### Pipeline Stage Performance
+![Pipeline stage durations and speed insights](docs/screenshots/pipeline-speed-stages.png)
+
+**What claude-spend shows from pipeline data:**
+- **Stage duration time-series** — track how implement, pr_review, and pr stage times trend over days
+- **Pipeline stage performance** — average duration per stage as a horizontal bar chart, instantly showing your bottleneck
+- **Speed insights** — ranked picks like "implement stage averages 12 minutes — slowest pipeline stage"
+
+### Quality & Run Outcomes
+![Quality metrics, run outcomes, and churners](docs/screenshots/pipeline-quality-outcomes.png)
+
+**What claude-spend shows from pipeline data:**
+- **Completion % per day** — daily trend of successful vs failed runs
+- **Avg quality iterations** — how many review loops each run needs (ideal is 1-2)
+- **Avg test iterations** — how many test-fix cycles before tests pass
+- **Run outcomes** — breakdown of error / completed / max_iterations / running states
+- **Top churners** — which issues cause the most quality and test rework, with links
+
+### Pipeline Insights
+![Pipeline-specific actionable insights](docs/screenshots/pipeline-insights.png)
+
+**Actionable insights derived from pipeline logs:**
+- Quality loop churn detection (averaging N iterations per run)
+- Completion rate warnings (only X% of runs complete successfully)
+- Error rate tracking (Y% of runs end in error state)
+- Stage bottleneck identification (slowest stage by average duration)
+- Model escalation analysis (unnecessary Opus usage on simple tasks)
+- One-click GitHub issue creation from any insight
+
+Without claude-pipeline logs, these sections are empty — claude-spend's standalone features (token usage, model breakdown, session analysis) still work with any Claude Code installation.
 
 ## Platform Configuration
 
@@ -199,7 +300,7 @@ The pipeline includes a Playwright E2E testing skill and agent for browser-based
 - **`playwright-test-developer` agent** — Senior QA specialist that writes E2E tests following the skill's conventions
 - **`/explore`** automatically generates E2E test tasks when `TEST_E2E_CMD` is configured in `platform.sh`
 
-The orchestrator runs unit tests first, then E2E tests (fail fast):
+The orchestrator runs unit tests first, then E2E and acceptance tests in parallel (fail fast):
 
 ```bash
 # In platform.sh
@@ -266,7 +367,7 @@ The orchestrator parses tasks from issue bodies using this convention:
 - **Done condition** `Done when: [criterion]` — explicit stopping condition
 - **Affected files** — exact file paths to read/modify, prevents broad exploration
 
-**Parsing:** The fuzzy parser handles common formatting variations (missing backticks, asterisk bullets, extra whitespace) and emits warnings on stderr. Regex: `- \[[ x]\] \x60\[(.+?)\]\x60 (.+)` extracts agent and description.
+**Parsing:** The fuzzy parser handles common formatting variations (missing backticks, asterisk bullets, extra whitespace) and emits warnings on stderr. Tasks without a complexity hint default to M.
 
 **Agent values** should match your `.claude/agents/` directory. The adaptation skill sets these up for your tech stack.
 
@@ -335,13 +436,14 @@ Over 99% of token usage is Claude **reading** context, not writing. These practi
 - **Use `/model` to switch tiers.** Haiku handles simple tasks (run tests, format code, quick questions) at a fraction of Opus cost.
 - **The pipeline auto-selects models** via `model-config.sh`: haiku for mechanical stages (parse, test, simplify, PR creation), sonnet for implementation and reviews, opus for complex L-sized tasks.
 - **S/M-complexity tasks use sonnet.** L-complexity tasks escalate to opus.
-- **Model escalation** provides resilience — each stage has a fallback model one tier up.
+- **Model escalation** provides resilience — each stage has a fallback model one tier up. Double-timeout triggers automatic escalation.
 
 ### CLAUDE.md Size
 
 Your CLAUDE.md is re-read on every message in every conversation. Each line compounds across the entire session.
 
-- Keep it under 200 lines. Move rarely-needed sections to separate files.
+- Keep it under 30-40 lines. Move rarely-needed sections to separate files.
+- The `/adapting-claude-pipeline` skill includes a lean CLAUDE.md template.
 - Remove technology checklists from agent definitions — put them in stage-specific prompts loaded only when needed.
 
 ### Pipeline-Specific
@@ -350,6 +452,7 @@ Your CLAUDE.md is re-read on every message in every conversation. Each line comp
 - **Light-tier stages cap at 5 turns** via `--max-turns` to prevent open-ended exploration.
 - **Parallel subagents** reduce wall-clock time and prevent context accumulation in a single session.
 - **Scope constraints in task descriptions** (`Scope: N files`, `Done when:`, `Affected files:`) prevent agents from over-exploring and bloating context.
+- **Pipeline profiles** automatically adjust iteration limits based on task complexity — minimal runs skip unnecessary review cycles.
 
 ## License
 
@@ -359,4 +462,5 @@ MIT — see [LICENSE](LICENSE)
 
 - Original pipeline: [aaddrick/claude-pipeline](https://github.com/aaddrick/claude-pipeline)
 - Skills adapted from: [obra/superpowers](https://github.com/obra/superpowers)
+- Spend dashboard: [claude-spend](https://github.com/stevegrocott/claude-spend)
 - Fork maintained by: [stevegrocott](https://github.com/stevegrocott)
