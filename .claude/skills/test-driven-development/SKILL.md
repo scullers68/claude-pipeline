@@ -118,7 +118,7 @@ Vague name, tests mock not code
 npm test path/to/test.test.ts 2>&1 | tail -10
 ```
 
-Truncate test output to last 10 lines — you only need pass/fail and error summary. If test fails unexpectedly, re-run without truncation to see full output.
+Truncate output to last 10 lines — you only need pass/fail and error summary. If test fails unexpectedly, re-run without truncation to see full output.
 
 Confirm:
 - Test fails (not errors)
