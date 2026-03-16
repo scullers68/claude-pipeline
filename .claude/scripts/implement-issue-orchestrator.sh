@@ -223,6 +223,29 @@ if [[ -n "$BASE_BRANCH" ]] && ! [[ "$BASE_BRANCH" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
 fi
 
 # =============================================================================
+# CANONICALIZE RELATIVE PATHS TO ABSOLUTE
+# =============================================================================
+#
+# File paths from defaults or user arguments may be relative.  Convert them
+# to absolute early so the script works correctly regardless of later cwd
+# changes (e.g. cd into a worktree).
+#
+
+to_absolute_path() {
+    local path="$1"
+    if [[ "$path" != /* ]]; then
+        printf '%s' "$PWD/$path"
+    else
+        printf '%s' "$path"
+    fi
+}
+
+STATUS_FILE="$(to_absolute_path "$STATUS_FILE")"
+if [[ -n "$RESUME_LOG_DIR" ]]; then
+    RESUME_LOG_DIR="$(to_absolute_path "$RESUME_LOG_DIR")"
+fi
+
+# =============================================================================
 # LOGGING FUNCTIONS (defined early so other functions can use log/log_error)
 # Note: LOG_FILE and mkdir happen later after LOG_BASE is set
 # =============================================================================
@@ -688,6 +711,12 @@ else
     # Normal mode - set LOG_BASE
     LOG_BASE="logs/implement-issue/issue-${ISSUE_NUMBER}-$(date +%Y%m%d-%H%M%S)"
 fi
+
+# Canonicalize LOG_BASE and STATUS_FILE after all code paths have set them.
+# STATUS_FILE may have been overridden in the logdir resume path (e.g. to a
+# relative fallback "status.json"), so re-canonicalize here.
+LOG_BASE="$(to_absolute_path "$LOG_BASE")"
+STATUS_FILE="$(to_absolute_path "$STATUS_FILE")"
 
 # Display mode info
 if [[ -n "$RESUME_MODE" ]]; then
