@@ -2307,6 +2307,56 @@ compute_task_batches() {
 
 # Create a git worktree for a single task.
 #
+# Clean up stale worktree branches from previous failed runs.
+#
+# Prunes broken worktree refs and deletes any wt-task-*
+# branches that no longer have active worktrees.
+#
+# Arguments:
+#   (none)
+#
+cleanup_stale_worktrees() {
+	# Prune broken worktree references
+	git worktree prune 2>&1 | while IFS= read -r line; do
+		log "worktree prune: $line"
+	done
+
+	# Collect active worktree branches
+	local -a active_wt_branches=()
+	local wt_line
+	while IFS= read -r wt_line; do
+		# git worktree list output: /path  commitsha [branchname]
+		local branch
+		branch=$(printf '%s' "$wt_line" \
+			| sed -n 's/.*\[\(.*\)\]/\1/p')
+		if [[ -n "$branch" ]]; then
+			active_wt_branches+=("$branch")
+		fi
+	done < <(git worktree list 2>/dev/null)
+
+	# Delete wt-task-* branches without active worktrees
+	local branch_name
+	while IFS= read -r branch_name; do
+		[[ -z "$branch_name" ]] && continue
+		local is_active=false
+		local ab
+		for ab in "${active_wt_branches[@]+"${active_wt_branches[@]}"}"; do
+			if [[ "$ab" == "$branch_name" ]]; then
+				is_active=true
+				break
+			fi
+		done
+		if [[ "$is_active" == "false" ]]; then
+			log "Cleaning stale branch: $branch_name"
+			git branch -D "$branch_name" 2>&1 \
+				| while IFS= read -r line; do
+					log "  $line"
+				done
+		fi
+	done < <(git branch --list 'wt-task-*' \
+		--format='%(refname:short)' 2>/dev/null)
+}
+
 # Arguments:
 #   $1 - worktree base directory
 #   $2 - feature branch name (source commit)
@@ -2324,19 +2374,48 @@ create_task_worktree() {
 
 	mkdir -p "$wt_base"
 
+	# Idempotent branch creation: if the branch exists but
+	# has no active worktree, delete it first (stale from a
+	# prior failed run). If it has an active worktree, that
+	# indicates a parallel conflict — fail loudly.
+	if git show-ref --verify --quiet \
+		"refs/heads/$wt_branch" 2>/dev/null; then
+		local existing_wt
+		existing_wt=$(git worktree list --porcelain \
+			2>/dev/null \
+			| awk -v b="refs/heads/$wt_branch" \
+				'/^worktree /{wt=$2} /^branch /{if($2==b) print wt}')
+		if [[ -n "$existing_wt" ]] \
+			&& [[ -d "$existing_wt" ]]; then
+			log_error "Branch $wt_branch has an" \
+				"active worktree at $existing_wt" \
+				"— cannot overwrite"
+			return 1
+		fi
+		log "Removing stale branch $wt_branch" \
+			"from prior run"
+		git branch -D "$wt_branch" 2>&1 \
+			| while IFS= read -r line; do
+				log "  $line"
+			done
+	fi
+
 	# Create branch from feature branch HEAD
-	if ! git branch "$wt_branch" "$feature_branch" \
-		>/dev/null 2>&1; then
+	local git_err
+	if ! git_err=$(git branch "$wt_branch" \
+		"$feature_branch" 2>&1); then
 		log_error \
-			"Failed to create branch $wt_branch"
+			"Failed to create branch $wt_branch:" \
+			"$git_err"
 		return 1
 	fi
 
 	# Create the worktree
-	if ! git worktree add "$wt_path" "$wt_branch" \
-		>/dev/null 2>&1; then
+	if ! git_err=$(git worktree add "$wt_path" \
+		"$wt_branch" 2>&1); then
 		log_error \
-			"Failed to create worktree at $wt_path"
+			"Failed to create worktree at" \
+			"$wt_path: $git_err"
 		git branch -D "$wt_branch" >/dev/null 2>&1
 		return 1
 	fi
@@ -2682,6 +2761,10 @@ execute_batch_parallel() {
 	local feature_branch="$3"
 	local base_branch="$4"
 
+	# Pre-flight: clean up stale worktree branches from
+	# any previous failed run before creating new ones.
+	cleanup_stale_worktrees
+
 	local wt_base="${LOG_BASE}/worktrees"
 	local batch_count
 	batch_count=$(printf '%s' "$batch_tasks" \
@@ -2718,6 +2801,8 @@ execute_batch_parallel() {
 		if [[ -z "$wt_path" ]]; then
 			log_error "Could not create worktree" \
 				"for task $tid"
+			# Clean up any partially-created branch
+			cleanup_worktree "" "$wt_branch"
 			printf '%s' \
 				'{"status":"failed","review_attempts":0}' \
 				> "$result_file"
