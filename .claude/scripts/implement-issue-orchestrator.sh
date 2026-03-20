@@ -464,6 +464,60 @@ increment_pr_review_iteration() {
 }
 
 # =============================================================================
+# TASK SUMMARY
+# =============================================================================
+
+compute_task_summary() {
+    jq '
+        # Map size labels to Fibonacci points
+        def size_points:
+            if . == "M" then 3
+            elif . == "L" then 5
+            else 1
+            end;
+
+        # Extract size from description: **(S)**, **(M)**, **(L)** -> default S
+        def extract_size:
+            if .description | test("\\*\\*\\(L\\)\\*\\*") then "L"
+            elif .description | test("\\*\\*\\(M\\)\\*\\*") then "M"
+            else "S"
+            end;
+
+        # Annotate each task with its size
+        [.tasks[] | . + {size: extract_size}] as $tasks |
+
+        # Count by status and size
+        {
+            completed: {
+                S: [$tasks[] | select(.status == "completed" and .size == "S")] | length,
+                M: [$tasks[] | select(.status == "completed" and .size == "M")] | length,
+                L: [$tasks[] | select(.status == "completed" and .size == "L")] | length
+            },
+            failed: {
+                S: [$tasks[] | select(.status == "failed" and .size == "S")] | length,
+                M: [$tasks[] | select(.status == "failed" and .size == "M")] | length,
+                L: [$tasks[] | select(.status == "failed" and .size == "L")] | length
+            },
+            sp_completed: ([$tasks[] | select(.status == "completed") | .size | size_points] | add // 0),
+            sp_total: ([$tasks[] | .size | size_points] | add // 0)
+        }
+    ' "$STATUS_FILE"
+}
+
+# write_task_summary_to_status() — compute task summary and persist it as
+# .task_summary in status.json.  Called on every exit path via the EXIT trap.
+write_task_summary_to_status() {
+    if [[ ! -f "$STATUS_FILE" ]]; then
+        return 0
+    fi
+
+    local summary
+    summary=$(compute_task_summary) || return 0
+
+    jq --argjson summary "$summary"        '.task_summary = $summary'        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+}
+
+# =============================================================================
 # METRICS EXPORT
 # =============================================================================
 
@@ -746,7 +800,7 @@ _TIMED_OUT_STAGE_NAMES=""
 # Register EXIT trap so export_metrics() runs on every exit path
 # (export_metrics is defined later in the STATUS FILE MANAGEMENT section
 # but bash traps are evaluated at exit time, so forward reference is fine)
-trap 'export_metrics' EXIT
+trap 'write_task_summary_to_status; export_metrics' EXIT
 
 # =============================================================================
 # STATUS SYNC TO LOG DIRECTORY
