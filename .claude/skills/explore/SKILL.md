@@ -24,23 +24,34 @@ Refine the vague input into concrete requirements:
 - If the description is specific enough, proceed without questions
 - Identify: what's wrong / what's wanted, who's affected, what success looks like
 
-### Step 2: Research the Codebase
+### Step 2: Research the Codebase (Pipeline-Tracked)
 
-**Framework/library documentation (use Context7 first):**
-- `context7.resolve_library_id` → `context7.get_library_docs` for framework API docs
-- Fall back to web search only if Context7 doesn't have the library or is unavailable
-- See `mcp-tools` skill for full decision matrix
+**Run the research subagent** to gather findings cheaply (haiku, escalates to sonnet if needed):
 
-**Code structure and patterns (use Serena for structural queries):**
-- Use Serena for class hierarchies, method signatures, call graphs
-- Use Grep/Glob for text-based file search and discovery
+```bash
+bash .claude/scripts/explore-orchestrator.sh \
+  --idea "$DESCRIPTION" \
+  --project-dir "$PWD"
+```
 
-**Document findings:**
-- Identify affected files, services, components
-- Document current behaviour vs desired behaviour
-- Note architectural patterns to follow
+This runs a tracked research phase that:
+- Uses the research-agent on haiku (cheapest model) for mechanical file reading
+- Escalates to sonnet if max turns hit
+- Writes `status.json` + `metrics.json` to `logs/explore/` (tracked by claude-spend)
+- Outputs `research-summary.json` with structured findings
 
-**Context Checkpoint (Optional):** If the research phase read many files or generated extensive tool output, consider writing a concise research summary to a temp file and suggesting `/clear` before evaluation. The evaluation and planning phases only need the summary, not the raw exploration context. Use `/create-session-summary` if checkpointing.
+**After the subagent completes**, read the research summary:
+
+```bash
+cat logs/explore/explore-*/research-summary.json | jq .
+```
+
+**Review the findings** — if the research is insufficient, do supplemental interactive research:
+- Use Context7 for framework docs (`context7.resolve_library_id` → `context7.get_library_docs`)
+- Use Serena for class hierarchies and symbol relationships
+- Use Grep/Glob for text-based file search
+
+**Present findings to the user** before proceeding to evaluation. The research phase is the boundary between cheap pipeline work and valuable interactive judgment.
 
 ### Step 3: Evaluate Approaches
 
@@ -53,12 +64,13 @@ Determine the best implementation strategy:
 ### Step 4: Generate Implementation Plan
 
 Break the chosen approach into implementable tasks:
+- **Maximum 3 tasks per issue** — if you need more, split into multiple issues with dependency ordering
 - Each task specifies an agent type (see Task Format below)
+- **Prefer S-complexity tasks** — they use haiku (cheapest). Break M tasks into multiple S tasks when possible. Avoid L tasks entirely.
 - Tasks are ordered by dependency (data layer first, then presentation)
-- Each task is a single logical unit of work
-- Each task should target 5-30 minutes of subagent execution time
+- Each task is a single logical unit of work targeting 5-15 minutes of subagent execution
 - If a task requires reading more than 3 files or modifying more than 2 files, split it
-- Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min), L=large (~30 min)
+- Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min)
 - Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
 
 **REQUIRED: Each task description MUST include specific file paths from Step 2 research.** Include file names, paths, and line numbers inline. This prevents vague descriptions that cause subagents to explore broadly.
@@ -203,7 +215,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 |------------|--------------|
 | Skip research, jump to planning | Plan won't account for existing patterns |
 | Create local plan files | The issue IS the plan — single source of truth |
-| Over-plan with 20+ tasks | Keep it focused; split into multiple issues if needed |
+| More than 3 tasks in one issue | Split into multiple issues — issues with 5+ tasks fail ~70% of the time |
 | Combine multiple concerns in one issue | One issue = one problem = one PR |
 | Ask too many clarifying questions | 0-2 questions max; research answers most questions |
 | Single task modifies 5+ files | Split into focused subtasks |
