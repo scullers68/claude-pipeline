@@ -47,6 +47,7 @@ _stage_to_tier() {
 		fix)            printf '%s' "standard" ;;
 		test)           printf '%s' "light" ;;
 		review)         printf '%s' "standard" ;;
+		research)       printf '%s' "light" ;;
 		simplify)       printf '%s' "light" ;;
 		pr)             printf '%s' "standard" ;;
 		pr-review)      printf '%s' "standard" ;;
@@ -98,7 +99,7 @@ if [[ -z "${_STAGE_PREFIXES+set}" ]]; then
 	readonly -a _STAGE_PREFIXES=(
 		fix-acceptance-test acceptance-test validate-plan
 		fix-deploy-verify deploy-verify spec-review code-review task-review parse-issue e2e-verify
-		pr-review implement simplify complete pr-fix fix-e2e review test docs fix pr
+		pr-review implement simplify research complete pr-fix fix-e2e review test docs fix pr
 	)
 fi
 
@@ -155,8 +156,8 @@ resolve_model() {
 	fi
 
 	# Apply complexity hint — overrides stage default when provided.
-	# Light-tier stages (test, parse-issue, validate-plan, complete, docs,
-	# simplify, acceptance-test) are mechanical and always use haiku;
+	# Light-tier stages (test, parse-issue, validate-plan, research, complete,
+	# docs, simplify, acceptance-test) are mechanical and always use haiku;
 	# complexity hints are ignored for them.
 	# The quality loop forwards task-level complexity to implement, review,
 	# and fix stages so model selection scales with task size.
