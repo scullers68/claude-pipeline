@@ -464,6 +464,47 @@ increment_pr_review_iteration() {
 }
 
 # =============================================================================
+# TASK SUMMARY
+# =============================================================================
+
+compute_task_summary() {
+    jq -r '
+        # Map size labels to Fibonacci points
+        def size_points:
+            if . == "M" then 3
+            elif . == "L" then 5
+            else 1
+            end;
+
+        # Extract size from description: **(S)**, **(M)**, **(L)** -> default S
+        def extract_size:
+            if .description | test("\\*\\*\\(L\\)\\*\\*") then "L"
+            elif .description | test("\\*\\*\\(M\\)\\*\\*") then "M"
+            else "S"
+            end;
+
+        # Annotate each task with its size
+        [.tasks[] | . + {size: extract_size}] as $tasks |
+
+        # Count by status and size
+        {
+            completed: {
+                S: [$tasks[] | select(.status == "completed" and .size == "S")] | length,
+                M: [$tasks[] | select(.status == "completed" and .size == "M")] | length,
+                L: [$tasks[] | select(.status == "completed" and .size == "L")] | length
+            },
+            failed: {
+                S: [$tasks[] | select(.status == "failed" and .size == "S")] | length,
+                M: [$tasks[] | select(.status == "failed" and .size == "M")] | length,
+                L: [$tasks[] | select(.status == "failed" and .size == "L")] | length
+            },
+            sp_completed: ([$tasks[] | select(.status == "completed") | .size | size_points] | add // 0),
+            sp_total: ([$tasks[] | .size | size_points] | add // 0)
+        }
+    ' "$STATUS_FILE"
+}
+
+# =============================================================================
 # METRICS EXPORT
 # =============================================================================
 
