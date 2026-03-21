@@ -4809,6 +4809,19 @@ $full_scope_failures
         "$branch" "$branch_scope" "$pipeline_profile" "$max_task_size"
 
     # -------------------------------------------------------------------------
+    # NO-COMMITS GATE: exit before expensive post-implementation stages
+    # If all tasks produced 0 commits, skip deploy-verify, docs, and PR creation.
+    # -------------------------------------------------------------------------
+    local post_impl_commit_count
+    post_impl_commit_count=$(git rev-list --count "${BASE_BRANCH}..${branch}" 2>/dev/null || echo 0)
+    if (( post_impl_commit_count == 0 )); then
+        log "⚠️  No commits on branch after implementation — all tasks failed without producing changes."
+        comment_issue "Pipeline: No Changes" "⚠️ No commits on branch \`${branch}\` relative to \`${BASE_BRANCH}\` — all tasks failed without producing changes. No PR created." ""
+        set_final_state "no_changes"
+        exit 0
+    fi
+
+    # -------------------------------------------------------------------------
     # STAGE: DEPLOY VERIFY
     # Deploys to a configured target environment (test/nas/staging) and polls
     # the health URL until the service is live, then runs a verification prompt
