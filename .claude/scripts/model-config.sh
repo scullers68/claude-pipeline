@@ -45,6 +45,7 @@ _stage_to_tier() {
 		implement)      printf '%s' "standard" ;;
 		task-review)    printf '%s' "standard" ;;
 		fix)            printf '%s' "standard" ;;
+		test-iter)      printf '%s' "standard" ;;
 		test)           printf '%s' "light" ;;
 		review)         printf '%s' "standard" ;;
 		research)       printf '%s' "light" ;;
@@ -99,7 +100,7 @@ if [[ -z "${_STAGE_PREFIXES+set}" ]]; then
 	readonly -a _STAGE_PREFIXES=(
 		fix-acceptance-test acceptance-test validate-plan
 		fix-deploy-verify deploy-verify spec-review code-review task-review parse-issue e2e-verify
-		pr-review implement simplify research complete pr-fix fix-e2e review test docs fix pr
+		pr-review implement simplify research complete pr-fix fix-e2e review test-iter test docs fix pr
 	)
 fi
 
