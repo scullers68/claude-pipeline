@@ -71,6 +71,7 @@ Break the chosen approach into implementable tasks:
 - Each task is a single logical unit of work targeting 5-15 minutes of subagent execution
 - If a task requires reading more than 3 files or modifying more than 2 files, split it
 - Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min)
+- **M-task review (required):** After drafting the task list, for each M or L task: (1) can it split by file? (2) can it split by named function — each function becomes its own S-task? (3) can it split into add/test/config concerns? If any split is possible, replace the M/L task with 2-3 S-tasks. Keep M only for genuinely single-file, single-concern work that cannot run in under 5 minutes.
 - Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
 
 **REQUIRED: Each task description MUST include specific file paths from Step 2 research.** Include file names, paths, and line numbers inline. This prevents vague descriptions that cause subagents to explore broadly.
@@ -200,6 +201,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 
 - **Prefer S-complexity tasks** — they use haiku (cheapest model). Only use M/L when the work genuinely requires it.
 - **Split M/L tasks into multiple S tasks** when the work is decomposable into independent steps.
+  - After drafting, apply the M-task review: for each M/L task check if it splits by file, by named function, or by concern (add/test/config). Replace with S-tasks if split is possible.
 - **Point tasks to specific files and line numbers** — vague descriptions cause subagents to explore broadly, triggering 19x more tool calls.
 - **Each task's affected file list reduces subagent exploration cost** — include file paths in the task description.
 

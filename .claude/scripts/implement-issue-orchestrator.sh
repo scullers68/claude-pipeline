@@ -4419,6 +4419,27 @@ $excerpt
             fi
         done
 
+        # (c) Warn about M/L complexity tasks
+        local ml_warn_count=0
+        local -a ml_warn_list=()
+        for ((i=0; i<task_count; i++)); do
+            local check_ml_desc
+            check_ml_desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
+            if echo "$check_ml_desc" | grep -qE '\*\*\([ML]\)\*\*'; then
+                log "⚠️  M/L task detected (task $((i+1))): ${check_ml_desc:0:80}..."
+                ml_warn_list+=("$check_ml_desc")
+                ((ml_warn_count++)) || true
+            fi
+        done
+        if ((ml_warn_count > 0)); then
+            log "⚠️  $ml_warn_count M/L task(s) in this run — M-tasks fail at 3× the rate of S-tasks. Consider decomposing."
+            local ml_warnings_json
+            ml_warnings_json=$(printf '%s\n' "${ml_warn_list[@]}" | jq -R . | jq -s .)
+            jq --argjson warnings "$ml_warnings_json" \
+               '.complexity_warnings = $warnings | .last_update = (now | todate)' \
+               "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        fi
+
         # (d) Extract backtick-quoted file paths from issue body and check existence
         if [[ -f "$issue_body_file" ]]; then
             local -a found_paths=()
