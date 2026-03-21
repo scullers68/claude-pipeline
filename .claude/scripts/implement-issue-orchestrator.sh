@@ -5000,6 +5000,16 @@ Add comprehensive JSDoc/TSDoc comments and commit with message: docs(issue-$ISSU
         fi
         log "Using existing PR #$pr_number"
     else
+        # Gate: skip PR if no commits on branch
+        local commit_count
+        commit_count=$(git -C "$LOOP_DIR" rev-list "${BASE_BRANCH}...${branch}" --count 2>/dev/null || echo 0)
+        if (( commit_count == 0 )); then
+            log "⚠️  No commits on branch relative to $BASE_BRANCH — all tasks may have failed without producing changes. Skipping PR creation."
+            comment_issue "Pipeline: No Changes" "⚠️ No commits on branch \`${branch}\` relative to \`${BASE_BRANCH}\` — all tasks may have failed without producing changes. No PR created." "default"
+            set_final_state "no_changes"
+            exit 0
+        fi
+
         set_stage_started "pr"
 
         local pr_prompt="Create a merge request for issue #$ISSUE_NUMBER.
