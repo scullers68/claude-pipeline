@@ -66,6 +66,7 @@ fi
 
 get_stage_timeout() {
     local stage_name="${1:-}"
+    local complexity="${2:-}"
 
     case "$stage_name" in
         test-iter*)     printf '%s' 900 ;;
@@ -75,7 +76,13 @@ get_stage_timeout() {
         fix-e2e*)       printf '%s' 900 ;;
         test*|docs*|pr*) printf '%s' 600 ;;
         task-review*)    printf '%s' 900 ;;
-        implement*|fix*) printf '%s' 1800 ;;
+        implement*|fix*)
+            if [[ "$complexity" == "L" ]]; then
+                printf '%s' 3600
+            else
+                printf '%s' 1800
+            fi
+            ;;
         *)               printf '%s' 1800 ;;
     esac
 }
@@ -1019,7 +1026,7 @@ run_stage() {
     if [[ -n "$timeout_override" ]]; then
         stage_timeout="$timeout_override"
     else
-        stage_timeout=$(get_stage_timeout "$stage_name")
+        stage_timeout=$(get_stage_timeout "$stage_name" "$complexity")
     fi
     log "  Timeout: ${stage_timeout}s"
 
@@ -2338,7 +2345,7 @@ compute_task_batches() {
 #
 # Clean up stale worktree branches from previous failed runs.
 #
-# Prunes broken worktree refs and deletes any wt-task-*
+# Prunes broken worktree refs and deletes any wt-i*
 # branches that no longer have active worktrees.
 #
 # Arguments:
@@ -2363,7 +2370,7 @@ cleanup_stale_worktrees() {
 		fi
 	done < <(git worktree list 2>/dev/null)
 
-	# Delete wt-task-* branches without active worktrees
+	# Delete wt-i* branches without active worktrees
 	local branch_name
 	while IFS= read -r branch_name; do
 		[[ -z "$branch_name" ]] && continue
@@ -2382,7 +2389,7 @@ cleanup_stale_worktrees() {
 					log "  $line"
 				done
 		fi
-	done < <(git branch --list 'wt-task-*' \
+	done < <(git branch --list 'wt-i*' \
 		--format='%(refname:short)' 2>/dev/null)
 }
 
@@ -2390,6 +2397,7 @@ cleanup_stale_worktrees() {
 #   $1 - worktree base directory
 #   $2 - feature branch name (source commit)
 #   $3 - task ID
+#   $4 - issue number
 # Outputs:
 #   Worktree path on stdout
 #
@@ -2397,8 +2405,9 @@ create_task_worktree() {
 	local wt_base="$1"
 	local feature_branch="$2"
 	local task_id="$3"
+	local issue_num="$4"
 
-	local wt_branch="wt-task-${task_id}"
+	local wt_branch="wt-i${issue_num}-t${task_id}"
 	local wt_path="${wt_base}/task-${task_id}"
 
 	mkdir -p "$wt_base"
@@ -2527,7 +2536,7 @@ run_task_in_worktree() {
 
 	local base_timeout
 	base_timeout=$(get_stage_timeout \
-		"implement-task-$task_id")
+		"implement-task-$task_id" "$task_size")
 	local base_model
 	base_model=$(resolve_model \
 		"implement-task-$task_id" "$task_size")
@@ -2819,13 +2828,13 @@ execute_batch_parallel() {
 		tagent=$(printf '%s' "$task" | jq -r '.agent')
 		tsize=$(extract_task_size "$tdesc")
 
-		local wt_branch="wt-task-${tid}"
+		local wt_branch="wt-i${ISSUE_NUMBER}-t${tid}"
 		local result_file
 		result_file="${LOG_BASE}/stages/task-${tid}-worktree.log"
 
 		local wt_path
 		wt_path=$(create_task_worktree \
-			"$wt_base" "$feature_branch" "$tid")
+			"$wt_base" "$feature_branch" "$tid" "$ISSUE_NUMBER")
 
 		if [[ -z "$wt_path" ]]; then
 			log_error "Could not create worktree" \
@@ -2847,23 +2856,47 @@ execute_batch_parallel() {
 		wt_branches+=("$wt_branch")
 		result_files+=("$result_file")
 
-		# Launch in background subshell
+		# Launch in background subshell with wall-time guard
 		(
+			# Enable job control so the child gets its own process group
+			# (PGID == _task_pid), letting the watchdog kill the whole tree.
+			set -m
 			run_task_in_worktree \
 				"$tid" "$tdesc" "$tagent" \
 				"$tsize" "$wt_path" \
 				"$wt_branch" "$feature_branch" \
-				"$result_file" "$base_branch"
+				"$result_file" "$base_branch" &
+			_task_pid=$!
+			set +m
+			( sleep "${MAX_TASK_WALL_TIME_SECS}" && \
+				kill -- -"$_task_pid" 2>/dev/null ) &
+			_watchdog_pid=$!
+			wait "$_task_pid" 2>/dev/null
+			_task_exit=$?
+			kill "$_watchdog_pid" 2>/dev/null
+			wait "$_watchdog_pid" 2>/dev/null || true
+			# exit 143 = SIGTERM from watchdog; only treat as timeout
+			# when no result file was written (guards against race
+			# where task completes as watchdog fires).
+			if [[ $_task_exit -eq 143 && \
+				! -f "$result_file" ]]; then
+				log_error "Task $tid TIMED OUT" \
+					"after ${MAX_TASK_WALL_TIME_SECS}s"
+				printf '%s' \
+					'{"status":"timeout","review_attempts":0}' \
+					> "$result_file"
+			fi
 		) &
 		local last_pid=$!
 		pids+=("$last_pid")
-		log "Task $tid launched (PID $last_pid)" \
+		log "Task $tid launched (PID $last_pid," \
+			"wall-time limit ${MAX_TASK_WALL_TIME_SECS}s)" \
 			"in $wt_path"
 	done
 
 	# Wait for all background tasks
 	local p
-	for p in "${pids[@]}"; do
+	for p in "${pids[@]+"${pids[@]}"}"; do
 		wait "$p" 2>/dev/null || true
 	done
 
@@ -2894,8 +2927,15 @@ execute_batch_parallel() {
 		local rstatus
 		rstatus=$(jq -r '.status' "$rf" 2>/dev/null)
 
-		if [[ "$rstatus" != "success" ]]; then
-			log_error "Task $tid failed in worktree"
+		if [[ "$rstatus" == "timeout" ]]; then
+			log_error "Task $tid TIMED OUT" \
+				"(exceeded ${MAX_TASK_WALL_TIME_SECS}s wall time)"
+			failed+=("$tid")
+			cleanup_worktree "$wp" "$wb"
+			continue
+		elif [[ "$rstatus" != "success" ]]; then
+			log_error "Task $tid failed in worktree" \
+				"(status: $rstatus)"
 			failed+=("$tid")
 			cleanup_worktree "$wp" "$wb"
 			continue
@@ -2974,7 +3014,7 @@ execute_batch_serial() {
 
 		local base_timeout
 		base_timeout=$(get_stage_timeout \
-			"implement-task-$tid")
+			"implement-task-$tid" "$tsize")
 		local base_model
 		base_model=$(resolve_model \
 			"implement-task-$tid" "$tsize")
@@ -4536,6 +4576,30 @@ $excerpt
     # 'minimal' skips optional quality/simplify stages and 'full' enforces them.
 
     # -------------------------------------------------------------------------
+    # COMPLEXITY-ADJUSTED WALL-CLOCK BUDGET
+    # Add 1800s per L-sized task, capped at 4x the base value.
+    # -------------------------------------------------------------------------
+    local l_task_count base_wall_time max_wall_time wall_time_bump
+    l_task_count=$(printf '%s' "$tasks_json" | jq -r '.[].description' \
+        | while IFS= read -r d; do
+            s=$(extract_task_size "$d")
+            [[ -n "$s" ]] && printf '%s\n' "$s"
+          done \
+        | grep -c '^L$' || true)
+    base_wall_time="$MAX_ORCHESTRATOR_WALL_TIME"
+    max_wall_time=$(( base_wall_time * 4 ))
+    wall_time_bump=$(( l_task_count * 1800 ))
+    MAX_ORCHESTRATOR_WALL_TIME=$(( base_wall_time + wall_time_bump ))
+    if (( MAX_ORCHESTRATOR_WALL_TIME > max_wall_time )); then
+        MAX_ORCHESTRATOR_WALL_TIME=$max_wall_time
+    fi
+    if (( wall_time_bump > 0 )); then
+        log "Complexity-adjusted wall-clock budget: ${base_wall_time}s + ${wall_time_bump}s (${l_task_count} L-task(s)) = ${MAX_ORCHESTRATOR_WALL_TIME}s (cap: ${max_wall_time}s)"
+    else
+        log "Wall-clock budget: ${MAX_ORCHESTRATOR_WALL_TIME}s (no L-tasks, no adjustment)"
+    fi
+
+    # -------------------------------------------------------------------------
     # EARLY SCOPE CHECK: config-only bypass
     # If all branch changes are config/doc files only, skip implement/test stages
     # and jump directly to PR creation.
@@ -4872,6 +4936,40 @@ $impl_summary" "$tagent"
 
                 _process_batch_results \
                     "$par_result" "parallel"
+
+                # If ALL tasks failed (no completions),
+                # retry each failed task serially before
+                # propagating the failure upward.
+                local par_comp_count
+                par_comp_count=$(printf '%s' "$par_result" \
+                    | jq '.completed | length')
+                local par_fail_count
+                par_fail_count=$(printf '%s' "$par_result" \
+                    | jq '.failed | length')
+                if ((par_comp_count == 0 && par_fail_count > 0)); then
+                    log_warn "Batch $batch_num: all" \
+                        "$par_fail_count task(s) failed" \
+                        "in parallel — retrying serially"
+
+                    local fail_ids
+                    fail_ids=$(printf '%s' "$par_result" \
+                        | jq '.failed')
+                    local full_retry_tasks
+                    full_retry_tasks=$(printf '%s' \
+                        "$batch_tasks" \
+                        | jq --argjson ids "$fail_ids" \
+                        '[.[] | select(
+                            .id as $t |
+                            $ids | index($t)
+                        )]')
+
+                    local full_retry_result
+                    full_retry_result=$(execute_batch_serial \
+                        "$full_retry_tasks" "$branch" \
+                        "$BASE_BRANCH")
+                    _process_batch_results \
+                        "$full_retry_result" "full-batch-retry"
+                fi
 
                 # Handle conflicted tasks by re-running
                 # them serially
