@@ -1,4 +1,12 @@
 {
+  "permissions": {
+    "allow": [
+      "Edit(.claude/**)",
+      "Write(.claude/**)",
+      "Edit(logs/**)",
+      "Write(logs/**)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {
