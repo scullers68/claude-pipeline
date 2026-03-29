@@ -66,6 +66,7 @@ UNIVERSAL_SKILLS=(
     "writing-plans"
     "writing-skills"
     "adapting-claude-pipeline"
+    "pipeline-sync"
 )
 
 # ---------------------------------------------------------------------------
