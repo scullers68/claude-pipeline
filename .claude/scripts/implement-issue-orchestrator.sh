@@ -1536,6 +1536,13 @@ Check:
 - Security concerns
 - If any \$queryRaw or raw SQL strings are present, cross-reference them against existing similar queries in the codebase to verify table names and query patterns are consistent
 
+Checklist (verify each item explicitly):
+1. Response schemas declared for all routes
+2. Auth middleware applied to all protected routes
+3. No unbounded queries without \`take\` (pagination limit)
+4. No N+1 patterns (all related data fetched in a single query or batched)
+5. No hollow test assertions (every assertion checks a meaningful value)
+
 FILES CHANGED:
 $review_changed_files
 
@@ -5670,6 +5677,49 @@ The command will output the MR number. Use that as pr_number in your response."
         local pr_diff
         pr_diff=$(git diff "$BASE_BRANCH"...HEAD -- 2>/dev/null | head -500)
 
+        # Sibling-file scan: for each directory containing a changed file,
+        # collect other .ts/.tsx files (excluding tests and already-diffed files),
+        # deduplicate, cap at 5. Uses newline-delimited strings for bash 3 compat.
+        local repo_root
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+
+        # Collect changed files (newline-delimited for lookup)
+        local changed_files_nl
+        changed_files_nl=$(git diff --name-only "$BASE_BRANCH"...HEAD -- 2>/dev/null)
+
+        local -a sibling_files_list=()
+        local seen_nl="" sib_f sib_dir
+        while IFS= read -r sib_f; do
+            [[ -z "$sib_f" ]] && continue
+            sib_dir="${sib_f%/*}"
+            [[ "$sib_dir" == "$sib_f" ]] && sib_dir="."
+            for f in "$repo_root/$sib_dir"/*.ts "$repo_root/$sib_dir"/*.tsx; do
+                [[ -f "$f" ]] || continue
+                [[ "$f" == *".test."* || "$f" == *".spec."* ]] && continue
+                # Normalize back to repo-relative path
+                local rel="${f#"$repo_root"/}"
+                # Skip files already in the diff
+                printf '%s\n' "$changed_files_nl" | grep -qxF "$rel" && continue
+                # Deduplicate
+                printf '%s\n' "$seen_nl" | grep -qxF "$rel" && continue
+                seen_nl="${seen_nl}${rel}
+"
+                sibling_files_list+=("$rel")
+                ((${#sibling_files_list[@]} >= 5)) && break 2
+            done
+        done <<< "$changed_files_nl"
+
+        local sibling_files_prompt=""
+        if ((${#sibling_files_list[@]} > 0)); then
+            local sibling_list
+            sibling_list=$(printf '%s, ' "${sibling_files_list[@]}")
+            sibling_list="${sibling_list%, }"
+            sibling_files_prompt="
+
+Also check these sibling files for the same auth, schema, and N+1 patterns: ${sibling_list}
+For sibling files, only report major-severity findings (omit minor findings)."
+        fi
+
         local review_prompt="Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
 
 Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
@@ -5681,6 +5731,13 @@ Here is the diff to review (do NOT run git diff yourself — use this):
 $pr_diff
 \`\`\`
 
+Checklist (verify each item explicitly):
+1. Response schemas declared for all routes
+2. Auth middleware applied to all protected routes
+3. No unbounded queries without \`take\` (pagination limit)
+4. No N+1 patterns (all related data fetched in a single query or batched)
+5. No hollow test assertions (every assertion checks a meaningful value)
+${sibling_files_prompt}
 Approve or request changes. Output a summary suitable for an issue comment."
 
         local review_result
@@ -5747,9 +5804,48 @@ ${major_descriptions}"
         # Comment #11: PR Combined Review Result
         local review_icon="✅"
         [[ "$review_verdict" == "changes_requested" ]] && review_icon="🔄"
+
+        # Create follow-up GH issues for adjacent_issues with major severity
+        local followup_comment=""
+        if [[ "$review_verdict" == "approved" ]]; then
+            local adjacent_json adj_count
+            adjacent_json=$(printf '%s' "$review_result" | \
+                jq -c '[.adjacent_issues // [] | .[] | select(.severity == "major")]' \
+                2>/dev/null || echo "[]")
+            adj_count=$(printf '%s' "$adjacent_json" | jq 'length' 2>/dev/null || echo "0")
+            if (( adj_count > 0 )); then
+                local created_nums=()
+                while IFS= read -r adj_item; do
+                    local adj_title adj_body
+                    adj_title=$(printf '%s' "$adj_item" | jq -r '.title // ""')
+                    adj_body=$(printf '%s' "$adj_item" | jq -r '.body // ""')
+                    [[ -z "$adj_title" ]] && continue
+                    local new_num
+                    new_num=$("$PLATFORM_DIR/create-issue.sh" \
+                        --title "$adj_title" --body "$adj_body" \
+                        --labels "pipeline-followup" 2>/dev/null || true)
+                    if [[ -n "$new_num" ]]; then
+                        created_nums+=("#$new_num")
+                        log "Created follow-up issue #$new_num: $adj_title"
+                    else
+                        log "WARN: failed to create follow-up issue for: $adj_title"
+                    fi
+                done < <(printf '%s' "$adjacent_json" | jq -c '.[]'  2>/dev/null)
+                if (( ${#created_nums[@]} > 0 )); then
+                    local nums_joined
+                    nums_joined=$(printf '%s, ' "${created_nums[@]}")
+                    nums_joined="${nums_joined%, }"
+                    followup_comment="
+
+---
+📋 **Follow-up issues created:** $nums_joined"
+                fi
+            fi
+        fi
+
         comment_pr "$pr_number" "PR Review (Iteration $pr_iteration)" "$review_icon **Result:** $review_verdict
 
-$review_summary" "code-reviewer"
+$review_summary$followup_comment" "code-reviewer"
 
         if [[ "$review_verdict" == "approved" ]]; then
             pr_approved=true
