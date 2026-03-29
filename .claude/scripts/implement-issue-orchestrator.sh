@@ -1060,15 +1060,21 @@ run_stage() {
         fallback_args=(--fallback-model "$fallback_model")
     fi
 
-    # Cap exploration for inherently light-tier stages (parse, pr, complete, etc.)
+    # Cap exploration for inherently light-tier stages (parse, complete, docs, etc.)
     # These are mechanical and should complete in a few turns.
     # Do NOT cap implement/review/fix stages that use haiku via S-complexity override —
     # those still need enough turns to read files, make edits, and produce output.
+    #
+    # PR creation gets a separate cap — it only needs to run glab/gh mr create,
+    # push if needed, and format a description. 10 turns is plenty.
     local -a turns_args=()
     local _matched_prefix _inherent_tier
     _matched_prefix=$(_match_stage_prefix "$stage_name") || true
     _inherent_tier=$(_stage_to_tier "${_matched_prefix:-}")
-    if [[ "$model" == "haiku" && "$_inherent_tier" == "light" ]]; then
+    if [[ "${_matched_prefix:-}" == "pr" && "${_matched_prefix:-}" != "pr-review" && "${_matched_prefix:-}" != "pr-fix" ]]; then
+        turns_args=(--max-turns 10)
+        log "  Max turns: 10 (PR creation — push + create MR)"
+    elif [[ "$model" == "haiku" && "$_inherent_tier" == "light" ]]; then
         turns_args=(--max-turns 10)
         log "  Max turns: 10 (inherently light stage)"
     elif [[ "$model" == "haiku" ]]; then
@@ -1851,23 +1857,26 @@ all_tasks_s_complexity() {
 
 # Get PR review configuration based on diff size.
 # Returns JSON: { "model": "...", "timeout": N, "max_iterations": N }
-# Four tiers by diff line count:
-#   <20  lines  → haiku,  300s timeout, 1 iteration  (tiny)
-#   <50  lines  → haiku,  600s timeout, 1 iteration  (small)
-#   <200 lines  → sonnet, 900s timeout, MAX_PR_REVIEW_ITERATIONS (medium)
-#   200+ lines  → sonnet, 1800s timeout, MAX_PR_REVIEW_ITERATIONS (large)
+#
+# All tiers use sonnet. Haiku was tried for tiny/small diffs but in practice
+# it burns through max turns exploring the codebase (4.7M tokens for an
+# 11-line diff) then escalates to sonnet anyway — wasting ~$0.85 and ~5 min.
+# Sonnet with the diff included in the prompt finishes in 2-3 turns.
+#
+# Three tiers by diff line count:
+#   <50  lines  → sonnet, 180s timeout, 1 iteration  (small)
+#   <200 lines  → sonnet, 600s timeout, MAX_PR_REVIEW_ITERATIONS (medium)
+#   200+ lines  → sonnet, 1200s timeout, MAX_PR_REVIEW_ITERATIONS (large)
 get_pr_review_config() {
     local diff_lines
     diff_lines=$(get_diff_line_count "$BASE_BRANCH")
 
-    if (( diff_lines < 20 )); then
-        printf '{"model":"haiku","timeout":300,"max_iterations":1}'
-    elif (( diff_lines < 50 )); then
-        printf '{"model":"haiku","timeout":600,"max_iterations":1}'
+    if (( diff_lines < 50 )); then
+        printf '{"model":"sonnet","timeout":180,"max_iterations":1}'
     elif (( diff_lines < 200 )); then
-        printf '{"model":"sonnet","timeout":900,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
+        printf '{"model":"sonnet","timeout":600,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
     else
-        printf '{"model":"sonnet","timeout":1800,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
+        printf '{"model":"sonnet","timeout":1200,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
     fi
 }
 
@@ -5655,10 +5664,22 @@ The command will output the MR number. Use that as pr_number in your response."
         # -------------------------------------------------------------------------
         # COMBINED SPEC + CODE REVIEW → PR comment #11 (single pass)
         # -------------------------------------------------------------------------
+        # Include the diff inline so the reviewer doesn't waste turns running git diff
+        # and exploring the entire codebase. For small diffs this dramatically reduces
+        # token usage (4.7M → ~50K observed on an 11-line diff).
+        local pr_diff
+        pr_diff=$(git diff "$BASE_BRANCH"...HEAD -- 2>/dev/null | head -500)
+
         local review_prompt="Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
 
 Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
 Part 2 — Code Review: Review code quality, patterns, standards, and security.
+
+Here is the diff to review (do NOT run git diff yourself — use this):
+
+\`\`\`diff
+$pr_diff
+\`\`\`
 
 Approve or request changes. Output a summary suitable for an issue comment."
 
