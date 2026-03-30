@@ -69,6 +69,9 @@ UNIVERSAL_SKILLS=(
     "pipeline-sync"
     "pr-creation"
     "pr-review"
+    "complete-summary"
+    "test-validation"
+    "fix-from-review"
 )
 
 # ---------------------------------------------------------------------------

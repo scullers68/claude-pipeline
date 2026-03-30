@@ -3953,9 +3953,18 @@ Files: $(echo "$playwright_test_files" | tr '\n' ', ')
 "
         fi
 
-        local test_prompt="Run the test suite and validate test comprehensiveness in working directory $safe_dir.
+        local test_validation_skill
+        test_validation_skill=$(load_skill "test-validation")
 
-STEP 1 — TEST EXECUTION (Jest unit tests)
+        local test_prompt="${test_validation_skill:+## Skill Instructions — READ AND FOLLOW THESE
+
+$test_validation_skill
+
+## End Skill Instructions
+
+}Run the test suite and validate test quality in working directory $safe_dir.
+
+STEP 1 — TEST EXECUTION
 Run the following command:
 $test_command
 
@@ -5887,7 +5896,16 @@ $review_summary$followup_comment" "code-reviewer"
             local review_comments
             review_comments=$(printf '%s' "$review_result" | jq -r '.comments // ""')
 
-            local fix_prompt="Address PR review feedback on branch $branch in the current working directory:
+            local fix_from_review_skill
+            fix_from_review_skill=$(load_skill "fix-from-review")
+
+            local fix_prompt="${fix_from_review_skill:+## Skill Instructions — READ AND FOLLOW THESE
+
+$fix_from_review_skill
+
+## End Skill Instructions
+
+}Address PR review feedback on branch $branch in the current working directory:
 
 Review feedback:
 $review_comments
@@ -5922,15 +5940,18 @@ Fix the issues and commit. Output a summary of fixes applied."
     else
         set_stage_started "complete"
 
-        local complete_prompt="Generate a completion summary for PR #$pr_number implementing issue #$ISSUE_NUMBER.
+        local complete_skill
+        complete_skill=$(load_skill "complete-summary")
 
-Include:
-- Issue and branch info
-- Decisions made during implementation
-- Reviews passed
-- Final status
+        local complete_prompt="Generate a completion summary for PR #$pr_number implementing issue #$ISSUE_NUMBER on branch $branch.
 
-Output a summary suitable for a PR/MR comment."
+${complete_skill:+## Skill Instructions — READ AND FOLLOW THESE
+
+$complete_skill
+
+## End Skill Instructions
+
+}Output a summary suitable for a PR/MR comment."
 
         local complete_result
         complete_result=$(run_stage "complete" "$complete_prompt" "implement-issue-complete.json")
