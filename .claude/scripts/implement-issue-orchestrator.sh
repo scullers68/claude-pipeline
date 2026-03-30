@@ -1092,6 +1092,9 @@ run_stage() {
     if [[ "${_matched_prefix:-}" == "pr" && "${_matched_prefix:-}" != "pr-review" && "${_matched_prefix:-}" != "pr-fix" ]]; then
         turns_args=(--max-turns 5)
         log "  Max turns: 5 (PR creation — push + create MR)"
+    elif [[ "${_matched_prefix:-}" == "pr-review" ]]; then
+        turns_args=(--max-turns 10)
+        log "  Max turns: 10 (PR review — focused diff analysis)"
     elif [[ "$model" == "haiku" && "$_inherent_tier" == "light" ]]; then
         turns_args=(--max-turns 10)
         log "  Max turns: 10 (inherently light stage)"
@@ -1897,7 +1900,7 @@ get_pr_review_config() {
     diff_lines=$(get_diff_line_count "$BASE_BRANCH")
 
     if (( diff_lines < 50 )); then
-        printf '{"model":"sonnet","timeout":300,"max_iterations":1}'
+        printf '{"model":"sonnet","timeout":360,"max_iterations":1}'
     elif (( diff_lines < 200 )); then
         printf '{"model":"sonnet","timeout":600,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
     else
@@ -5606,7 +5609,7 @@ ${pr_creation_skill:+## Skill Instructions
 $pr_creation_skill}"
 
         local pr_result
-        pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json" "" "" "" "sonnet")
+        pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json" "" "" "" "opus")
 
         local pr_status
         pr_status=$(printf '%s' "$pr_result" | jq -r '.status')
