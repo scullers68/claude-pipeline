@@ -989,6 +989,24 @@ handle_rate_limit() {
 }
 
 # =============================================================================
+# SKILL LOADER
+# =============================================================================
+
+# Load a skill's SKILL.md content for injection into stage prompts.
+# Usage: local content; content=$(load_skill "pr-creation")
+# Returns empty string if skill file not found (non-fatal).
+load_skill() {
+    local skill_name="$1"
+    local skill_file="$CLAUDE_PROJECT_DIR/.claude/skills/$skill_name/SKILL.md"
+    if [[ -f "$skill_file" ]]; then
+        cat "$skill_file"
+    else
+        log_warn "Skill file not found: $skill_file"
+        echo ""
+    fi
+}
+
+# =============================================================================
 # STAGE RUNNERS
 # =============================================================================
 
@@ -1072,8 +1090,8 @@ run_stage() {
     _matched_prefix=$(_match_stage_prefix "$stage_name") || true
     _inherent_tier=$(_stage_to_tier "${_matched_prefix:-}")
     if [[ "${_matched_prefix:-}" == "pr" && "${_matched_prefix:-}" != "pr-review" && "${_matched_prefix:-}" != "pr-fix" ]]; then
-        turns_args=(--max-turns 10)
-        log "  Max turns: 10 (PR creation — push + create MR)"
+        turns_args=(--max-turns 5)
+        log "  Max turns: 5 (PR creation — push + create MR)"
     elif [[ "$model" == "haiku" && "$_inherent_tier" == "light" ]]; then
         turns_args=(--max-turns 10)
         log "  Max turns: 10 (inherently light stage)"
@@ -1879,7 +1897,7 @@ get_pr_review_config() {
     diff_lines=$(get_diff_line_count "$BASE_BRANCH")
 
     if (( diff_lines < 50 )); then
-        printf '{"model":"sonnet","timeout":180,"max_iterations":1}'
+        printf '{"model":"sonnet","timeout":300,"max_iterations":1}'
     elif (( diff_lines < 200 )); then
         printf '{"model":"sonnet","timeout":600,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
     else
@@ -5572,13 +5590,20 @@ Add comprehensive JSDoc/TSDoc comments and commit with message: docs(issue-$ISSU
     else
         set_stage_started "pr"
 
+        local pr_creation_skill
+        pr_creation_skill=$(load_skill "pr-creation")
+
         local pr_prompt="Create a merge request for issue #$ISSUE_NUMBER.
 
 Run this exact command (substitute a short description for <description>):
 
 git push -u origin $branch 2>/dev/null; $PLATFORM_DIR/create-mr.sh --source '$branch' --target '$BASE_BRANCH' --title 'feat(issue-$ISSUE_NUMBER): <description>' --body 'Closes #$ISSUE_NUMBER'
 
-The command will output the MR number. Use that as pr_number in your response."
+The command will output the MR number. Use that as pr_number in your response.
+
+${pr_creation_skill:+## Skill Instructions
+
+$pr_creation_skill}"
 
         local pr_result
         pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json" "" "" "" "sonnet")
@@ -5720,9 +5745,18 @@ Also check these sibling files for the same auth, schema, and N+1 patterns: ${si
 For sibling files, only report major-severity findings (omit minor findings)."
         fi
 
+        local pr_review_skill
+        pr_review_skill=$(load_skill "pr-review")
+
         local review_prompt="Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
 
-Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
+${pr_review_skill:+## Skill Instructions — READ AND FOLLOW THESE
+
+$pr_review_skill
+
+## End Skill Instructions
+
+}Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
 Part 2 — Code Review: Review code quality, patterns, standards, and security.
 
 Here is the diff to review (do NOT run git diff yourself — use this):
@@ -5730,13 +5764,6 @@ Here is the diff to review (do NOT run git diff yourself — use this):
 \`\`\`diff
 $pr_diff
 \`\`\`
-
-Checklist (verify each item explicitly):
-1. Response schemas declared for all routes
-2. Auth middleware applied to all protected routes
-3. No unbounded queries without \`take\` (pagination limit)
-4. No N+1 patterns (all related data fetched in a single query or batched)
-5. No hollow test assertions (every assertion checks a meaningful value)
 ${sibling_files_prompt}
 Approve or request changes. Output a summary suitable for an issue comment."
 

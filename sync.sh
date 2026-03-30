@@ -67,6 +67,8 @@ UNIVERSAL_SKILLS=(
     "writing-skills"
     "adapting-claude-pipeline"
     "pipeline-sync"
+    "pr-creation"
+    "pr-review"
 )
 
 # ---------------------------------------------------------------------------
