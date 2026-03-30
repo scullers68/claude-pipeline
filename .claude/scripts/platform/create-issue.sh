@@ -30,11 +30,11 @@ case "$TRACKER" in
       --type "$JIRA_DEFAULT_ISSUE_TYPE"
       --summary "$TITLE")
 
-    # Write body to temp file for large descriptions (avoids arg length limits)
+    # Convert markdown body to ADF and write to temp file (avoids arg length limits)
     if [[ -n "$BODY" ]]; then
       TMPFILE="$(mktemp)"
       trap 'rm -f "$TMPFILE"' EXIT
-      printf '%s' "$BODY" > "$TMPFILE"
+      printf '%s' "$BODY" | python3 "$SCRIPT_DIR/markdown-to-adf.py" > "$TMPFILE"
       ARGS+=(--description-file "$TMPFILE")
     fi
 
