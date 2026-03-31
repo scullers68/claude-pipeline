@@ -81,14 +81,15 @@ git diff HEAD~1 -- .claude/agents/ .claude/skills/ .claude/config/
 
 ## What's Inside
 
-- **26 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
+- **29 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
 - **8 specialized agents** (backend/frontend developers, reviewers, validators, Playwright test developer, orchestration writer)
-- **12 platform wrapper scripts** for GitHub/GitLab/Jira abstraction (including format converters)
+- **12 platform wrapper scripts** for GitHub/GitLab/Jira abstraction (including ADF/wiki format converters)
 - **2 hooks** for session initialization and post-PR simplification
 - **2 orchestration scripts** for batch issue processing and end-to-end implementation
 - **13 JSON schemas** for structured output at each pipeline stage
 - **30 BATS test files** across orchestrator and platform wrapper test suites
 - **Quality gates** at every stage: spec compliance, code quality, test validation, acceptance testing
+- **Auto-merge** when code review approves the PR
 
 ## Architecture
 
@@ -141,11 +142,14 @@ handle-issues (skill) → batch-orchestrator.sh
 ### Key Orchestrator Features
 
 - **Fuzzy task parsing** — handles missing backticks, asterisk bullets, leading whitespace, and missing square brackets with warnings
-- **Task batching** — tasks with non-overlapping file sets are grouped into parallel batches; tasks sharing files run sequentially
-- **Worktree parallelism** — parallel batches execute in isolated git worktrees and merge back
+- **Affected files extraction** — parses `Affected files:` lines from issue bodies and attaches them to tasks for accurate dependency detection
+- **Dependency-aware batching** — tasks with non-overlapping file sets (from explicit `affected_files` or regex extraction) are grouped into parallel batches; tasks sharing files run sequentially to prevent merge conflicts
+- **Worktree parallelism** — parallel batches execute in isolated git worktrees with per-task wall-time limits (default 30 min) and merge back to the feature branch
+- **Implementation guardrails** — aborts early with a clear error if 0 tasks complete or if the feature branch has 0 commits after implementation (prevents cascading failures through test/PR stages)
 - **Pipeline profiles** — classifies issues as minimal/standard/full based on task count and complexity (see table below)
 - **Smart test targeting** — runs only tests related to changed files; detects convergence (repeated identical failures) and breaks loops
 - **Model escalation** — each stage has a fallback model one tier up (haiku→sonnet→opus) for resilience; double-timeout triggers automatic escalation
+- **Auto-merge** — when the PR review stage approves, the orchestrator automatically merges the PR/MR
 - **Metrics export** — tracks quality iterations, test iterations, PR review iterations, and escalations; feeds into [claude-spend](#spend-analysis-with-claude-spend)
 - **Binary file sanitization** — scans commits for accidentally staged binary/data files and removes them before pushing
 - **Resume support** — can resume from any stage after interruption
@@ -166,10 +170,11 @@ The orchestrator classifies each run into a profile based on task complexity, th
 |----------|--------|---------|
 | **Discovery** | explore, investigating-codebase-for-user-stories | Turn ideas into fully-planned issues |
 | **Process** | brainstorming, TDD, systematic-debugging, writing-plans, dispatching-parallel-agents | Enforce discipline and methodology |
-| **Workflow** | handle-issues, implement-issue, process-pr, subagent-driven-development, executing-plans | Automate multi-step development workflows |
+| **Workflow** | handle-issues, implement-issue, process-pr, pr-creation, pr-review, subagent-driven-development, executing-plans | Automate multi-step development workflows |
 | **Domain** | bulletproof-frontend, ui-design-fundamentals, write-docblocks, review-ui, playwright-testing | Tech-stack-specific guidance |
 | **Reference** | mcp-tools, using-skills | Tool selection and skill discovery |
-| **Meta** | writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop, create-session-summary, resume-session | Maintain and extend the pipeline itself |
+| **Meta** | writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop, create-session-summary, complete-summary, resume-session | Maintain and extend the pipeline itself |
+| **Quality** | test-validation, fix-from-review | Post-implementation validation and review-driven fixes |
 | **Utility** | using-git-worktrees | Workspace isolation for feature work |
 
 ### Model Configuration
@@ -391,7 +396,7 @@ The orchestrator parses tasks from issue bodies using this convention:
 - **Done condition** `Done when: [criterion]` — explicit stopping condition
 - **Affected files** — exact file paths to read/modify, prevents broad exploration
 
-**Parsing:** The fuzzy parser handles common formatting variations (missing backticks, asterisk bullets, extra whitespace) and emits warnings on stderr. Tasks without a complexity hint default to M.
+**Parsing:** The fuzzy parser handles common formatting variations (missing backticks, asterisk bullets, extra whitespace) and emits warnings on stderr. Tasks without a complexity hint default to M. The parser runs a second pass to extract `Affected files:` lines and attach them to the preceding task — these are used by `compute_task_batches` to detect file-level dependencies and prevent merge conflicts in parallel execution.
 
 **Agent values** should match your `.claude/agents/` directory. The adaptation skill sets these up for your tech stack.
 
@@ -430,6 +435,32 @@ cd .claude/scripts/platform-test
 ```
 
 Test coverage includes: argument parsing, branch verification, comment helpers, constants, deploy verification, environment error detection, metrics export, fuzzy task parsing, helper functions, integration, JSON parsing, model config, pipeline profiles, PR review config, prompt file lists, quality loop, rate limiting, smart test targeting, stage runner, status functions, task batching, timeout escalation, and verdict parsing.
+
+## Recent Changes
+
+### v2025-03 (March 2026)
+
+**Orchestrator reliability:**
+- Fixed undefined `MAX_TASK_WALL_TIME_SECS` that silently crashed parallel task execution after launching the first task
+- Added guardrails: abort on 0 completed tasks, abort on 0 commits after implementation stage
+- `affected_files` now parsed from issue bodies and used for dependency-aware batching — tasks sharing files run sequentially, preventing merge conflicts
+- Per-task file set logging for debugging batch assignment decisions
+- SIGPIPE prevention for background orchestrator launches
+
+**PR workflow:**
+- Auto-merge when code review approves the PR
+- New `pr-creation` and `pr-review` skills with orchestrator integration
+- Improved PR review prompt quality with follow-up issue generation
+
+**New skills:**
+- `complete-summary` — structured session completion reports
+- `test-validation` — post-implementation test verification
+- `fix-from-review` — apply code review feedback systematically
+
+**Platform support:**
+- Jira comments and descriptions now convert to ADF format (Atlassian Document Format)
+- macOS compatibility fixes for `handle-issues` (jq null guards, paste→awk)
+- Jira `create-issue` error handling improvements
 
 ## Philosophy
 
