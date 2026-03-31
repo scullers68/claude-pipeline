@@ -55,6 +55,7 @@ MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
 MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
 MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"
+MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
 readonly RATE_LIMIT_BUFFER=60
@@ -2219,12 +2220,37 @@ _parse_task_lines() {
 		fi
 
 		task_id=$((task_id + 1))
+		# Store task for now; affected_files will be attached in the second pass.
 		tasks_json=$(printf '%s' "$tasks_json" | jq \
 			--argjson id "$task_id" \
 			--arg desc "$desc" \
 			--arg agent "$agent" \
-			'. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0}]')
+			'. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0, affected_files: []}]')
 
+	done <<< "$tasks_section"
+
+	# Second pass: extract "Affected files:" lines and attach to preceding task.
+	local current_task_idx=-1
+	while IFS= read -r line; do
+		# Detect task lines (same patterns as above) to track which task we're under.
+		if [[ "$line" =~ ^[-\*][[:space:]]+(\[.?\][[:space:]]*)?\`?\[? ]]; then
+			current_task_idx=$((current_task_idx + 1))
+		fi
+		# Match "Affected files:" line (case-insensitive, optional leading whitespace).
+		if [[ "$line" =~ ^[[:space:]]*[Aa]ffected[[:space:]][Ff]iles:[[:space:]]*(.+)$ ]] && (( current_task_idx >= 0 )); then
+			local files_str="${BASH_REMATCH[1]}"
+			# Split comma-separated file paths, trim whitespace, remove "(new)" annotations.
+			local files_arr
+			files_arr=$(printf '%s' "$files_str" \
+				| tr ',' '\n' \
+				| sed 's/(new)//g; s/^[[:space:]]*//; s/[[:space:]]*$//' \
+				| grep -v '^$' \
+				| jq -R '.' | jq -s '.')
+			tasks_json=$(printf '%s' "$tasks_json" | jq \
+				--argjson idx "$current_task_idx" \
+				--argjson files "$files_arr" \
+				'.[$idx].affected_files = $files')
+		fi
 	done <<< "$tasks_section"
 
 	printf '%s\n' "$tasks_json"
@@ -2314,9 +2340,17 @@ compute_task_batches() {
 		local desc
 		desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
 
-		# Primary: extract path-like tokens from the task description
+		# Primary: use explicit affected_files from task JSON if available
+		local af_json
+		af_json=$(printf '%s' "$tasks_json" | jq -r ".[$i].affected_files // [] | .[]" 2>/dev/null)
+
 		local desc_files
-		desc_files=$(_extract_task_files_from_desc "$desc")
+		if [[ -n "$af_json" ]]; then
+			desc_files="$af_json"
+		else
+			# Fallback: extract path-like tokens from the task description
+			desc_files=$(_extract_task_files_from_desc "$desc")
+		fi
 
 		# Secondary: add diff files that share a path component with any
 		# desc_files token (augments detection when the branch already has commits)
@@ -2343,6 +2377,11 @@ compute_task_batches() {
 		combined=$(printf '%s\n%s' "$desc_files" "$aug_files" \
 			| sort -u | grep -v '^[[:space:]]*$')
 		task_files[$i]="$combined"
+		if [[ -n "$combined" ]]; then
+			log "  Task $((i+1)) files: $(echo "$combined" | tr '\n' ', ')"
+		else
+			log "  Task $((i+1)) files: (none detected)"
+		fi
 	done
 
 	# Greedy batch assignment
@@ -5339,6 +5378,18 @@ $impl_summary" "$tagent"
         log "Implementation complete." \
             "$completed_tasks/$task_count tasks" \
             "completed (with per-task quality loops)."
+
+        # Guardrail: abort if no tasks completed but tasks were expected.
+        if (( completed_tasks == 0 && task_count > 0 )); then
+            log_error "ABORT: 0/$task_count tasks completed — implementation produced no changes." \
+                "This usually indicates a bug in the orchestrator (e.g. undefined variable, worktree failure)." \
+                "Check stage logs for errors."
+            comment_issue "Implementation Failed" \
+                "❌ 0/$task_count tasks completed. No changes were produced. Aborting pipeline." \
+                "error"
+            set_final_state "error"
+            exit 1
+        fi
     fi
 
     # -------------------------------------------------------------------------
@@ -5347,6 +5398,21 @@ $impl_summary" "$tagent"
     local branch_scope
     branch_scope=$(detect_change_scope "." "$BASE_BRANCH")
     log "Branch change scope: $branch_scope"
+
+    # Guardrail: if we just ran implementation but have no changes, something went wrong.
+    if is_stage_completed "implement" && [[ "$branch_scope" == "config" ]]; then
+        local commits_ahead
+        commits_ahead=$(git rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
+        if (( commits_ahead == 0 )); then
+            log_error "ABORT: Implementation stage completed but branch has 0 commits ahead of $BASE_BRANCH." \
+                "Worktree merge-back likely failed. Check orchestrator log for merge errors."
+            comment_issue "Implementation Failed" \
+                "❌ Implementation completed but no commits landed on the feature branch. Aborting." \
+                "error"
+            set_final_state "error"
+            exit 1
+        fi
+    fi
 
     # -------------------------------------------------------------------------
     # STAGE: TEST LOOP (after all tasks complete)
