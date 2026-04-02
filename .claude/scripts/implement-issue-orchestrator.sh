@@ -6057,34 +6057,37 @@ $complete_summary
     fi
 
     # -------------------------------------------------------------------------
-    # STAGE: AUTO-MERGE (optional)
-    # Triggered when AUTO_MERGE=1.  Merges the PR using MERGE_STYLE (default:
-    # squash).  A failure logs a warning but does not abort the pipeline.
+    # STAGE: MERGE
+    # Merges the PR/MR into the base branch after successful review.
+    # Uses merge-mr.sh which respects MERGE_STYLE (squash/merge/rebase) from
+    # platform.sh. After merge, checks out and pulls the base branch.
     # -------------------------------------------------------------------------
-    if [[ "${AUTO_MERGE:-0}" == "1" ]]; then
-        local merge_style="${MERGE_STYLE:-squash}"
-        log "AUTO_MERGE=1: merging PR #$pr_number with --$merge_style"
-        set_stage_started "auto_merge"
-        local merge_output merge_exit
-        merge_exit=0
-        merge_output=$(gh pr merge "$pr_number" "--$merge_style" --yes 2>&1) \
-            || merge_exit=$?
-        if ((merge_exit == 0)); then
-            log "PR #$pr_number merged successfully"
-            comment_issue "PR #$pr_number Auto-Merged" \
-"PR #$pr_number has been automatically merged into \`$BASE_BRANCH\`.
+    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "merge_pr"; then
+        log "Skipping merge_pr stage (already completed)"
+    else
+        set_stage_started "merge_pr"
+        log "Merging PR #$pr_number into $BASE_BRANCH..."
+        comment_issue "Merge: Merging" \
+            "🔀 Merging PR #$pr_number into \`$BASE_BRANCH\`..." \
+            "default"
 
-**Merge style:** \`$merge_style\`
-**Branch:** \`$branch\`
-**PR:** #$pr_number"
-            set_stage_completed "auto_merge"
-            jq '.stages.auto_merge.merged = true | .last_update = (now | todate)' \
-                "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
-                && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
-            sync_status_to_log
+        if "$PLATFORM_DIR/merge-mr.sh" "$pr_number" >>"${LOG_FILE:-/dev/null}" 2>&1; then
+            log "PR #$pr_number merged successfully. Switching to $BASE_BRANCH..."
+            git fetch origin >>"${LOG_FILE:-/dev/null}" 2>&1 \
+                && git checkout "$BASE_BRANCH" >>"${LOG_FILE:-/dev/null}" 2>&1 \
+                && git pull >>"${LOG_FILE:-/dev/null}" 2>&1
+            log "Now on $BASE_BRANCH (up to date)"
+            comment_issue "Merge: Complete" \
+                "✅ PR #$pr_number merged into \`$BASE_BRANCH\` successfully." \
+                "default"
+            set_stage_completed "merge_pr"
         else
-            log_warn "Auto-merge of PR #$pr_number failed" \
-                "(exit $merge_exit): $merge_output"
+            log_error "Failed to merge PR #$pr_number"
+            comment_issue "Merge: Failed" \
+                "❌ Failed to merge PR #$pr_number. Manual intervention required." \
+                "default"
+            set_final_state "error"
+            exit 1
         fi
     fi
 
