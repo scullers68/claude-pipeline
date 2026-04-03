@@ -5399,6 +5399,40 @@ $impl_summary" "$tagent"
     branch_scope=$(detect_change_scope "." "$BASE_BRANCH")
     log "Branch change scope: $branch_scope"
 
+    # Already-done check: if all tasks reported already_done or files_changed:[],
+    # the issue was previously implemented — exit cleanly without PR or tests.
+    # Guard: only skip PR creation if the branch also has no commits (prevents false-positive
+    # exits when agents set already_done:true after genuinely committing changes).
+    if is_stage_completed "implement"; then
+        local all_already_done=true
+        local _rf _already_done _files_changed
+        for _rf in "${LOG_BASE}/stages"/task-*-worktree.log \
+                   "${LOG_BASE}/stages"/task-*-serial.log; do
+            [[ -f "$_rf" ]] || continue
+            _already_done=$(jq -r '.already_done // false' "$_rf" 2>/dev/null || echo "false")
+            _files_changed=$(jq -r '(.files_changed // []) | length' "$_rf" 2>/dev/null || echo "1")
+            if [[ "$_already_done" != "true" && "$_files_changed" != "0" ]]; then
+                all_already_done=false
+                break
+            fi
+        done
+
+        if [[ "$all_already_done" == "true" && "$completed_tasks" -gt 0 ]]; then
+            local commits_ahead
+            commits_ahead=$(git rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
+            if (( commits_ahead > 0 )); then
+                log "All $completed_tasks task(s) reported already_done but branch has $commits_ahead commit(s) ahead of $BASE_BRANCH — continuing to PR creation."
+            else
+                log "All $completed_tasks task(s) reported already_done — issue was previously implemented."
+                comment_issue "Already Implemented" \
+                    "✅ All tasks for this issue were already completed in a prior run. No new changes are needed. Closing as done." \
+                    "default"
+                set_final_state "completed"
+                exit 0
+            fi
+        fi
+    fi
+
     # Guardrail: if we just ran implementation but have no changes, something went wrong.
     if is_stage_completed "implement" && [[ "$branch_scope" == "config" ]]; then
         local commits_ahead
