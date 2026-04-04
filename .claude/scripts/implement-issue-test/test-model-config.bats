@@ -113,6 +113,18 @@ run_with_config() {
 	[[ "$output" == "light" ]]
 }
 
+@test "stage test-iter maps to standard" {
+	run_with_config '_stage_to_tier "test-iter"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "standard" ]]
+}
+
+@test "resolve_model test-iter-1 resolves to sonnet" {
+	run_with_config 'resolve_model "test-iter-1"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "sonnet" ]]
+}
+
 @test "stage review maps to standard" {
 	run_with_config '_stage_to_tier "review"'
 	[ "$status" -eq 0 ]
