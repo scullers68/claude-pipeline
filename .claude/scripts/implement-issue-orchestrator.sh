@@ -2747,10 +2747,14 @@ Commit your changes with a descriptive message."
 		impl_summary=$(printf '%s' "$impl_result" \
 			| jq -r '.summary // "Implementation completed"')
 
+		local files_changed_wt_json
+		files_changed_wt_json=$(git -C "$wt_path" diff --name-only HEAD~1 HEAD \
+			2>/dev/null | jq -R -s 'split("\n") | map(select(length>0))')
 		printf '%s' "{
 \"status\":\"success\",
 \"review_attempts\":$review_attempts,
 \"commit\":\"$commit_sha\",
+\"files_changed\":${files_changed_wt_json:-[]},
 \"summary\":$(printf '%s' "$impl_summary" | jq -Rs .)
 }" > "$result_file"
 		return 0
@@ -3478,13 +3482,18 @@ Commit your changes with a descriptive message."
 			impl_summary=$(printf '%s' "$impl_result" \
 				| jq -r \
 				'.summary // "Implementation completed"')
+			local files_changed_json
+			files_changed_json=$(git diff --name-only HEAD~1 HEAD \
+				2>/dev/null | jq -R -s \
+				'split("\n") | map(select(length>0))')
 			local rf
 			rf="${LOG_BASE}/stages/task-${tid}-serial.log"
 			printf '%s' "{
 \"status\":\"success\",
 \"review_attempts\":$review_attempts,
 \"commit\":\"$commit_sha\",
-\"summary\":$(printf '%s' "$impl_summary" | jq -Rs .)
+\"summary\":$(printf '%s' "$impl_summary" | jq -Rs .),
+\"files_changed\":${files_changed_json:-[]}
 }" > "$rf"
 
 			completed+=("$tid")
@@ -5406,6 +5415,9 @@ $impl_summary" "$tagent"
     if is_stage_completed "implement"; then
         local all_already_done=true
         local _rf _already_done _files_changed
+        # files_changed is now reliably written by execute_batch_serial (added in feat/issue-152),
+        # so a missing or empty array is a genuine signal that no files were changed, not a gap.
+        # The commits_ahead guard below remains as defence-in-depth against false-positive exits.
         for _rf in "${LOG_BASE}/stages"/task-*-worktree.log \
                    "${LOG_BASE}/stages"/task-*-serial.log; do
             [[ -f "$_rf" ]] || continue
