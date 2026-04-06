@@ -279,7 +279,7 @@ update_issue_field() {
 }
 
 update_progress() {
-    jq '.progress.completed = ([.issues[] | select(.status == "completed")] | length) |
+    jq '.progress.completed = ([.issues[] | select(.status == "completed" or .status == "already_done")] | length) |
         .progress.failed = ([.issues[] | select(.status == "failed" or .status == "skipped")] | length) |
         .progress.in_progress = ([.issues[] | select(.status == "in_progress")] | length) |
         .progress.pending = ([.issues[] | select(.status == "pending")] | length) |
@@ -475,6 +475,9 @@ process_issue() {
                     pr_number=$(echo "$impl_output" | grep -oE 'PR: #[0-9]+' | grep -oE '[0-9]+' | head -1)
                 fi
                 ;;
+            already_implemented)
+                impl_status="already_implemented"
+                ;;
             error|max_iterations_quality|max_iterations_pr_review)
                 impl_status="error"
                 impl_error="Script exited with state: $state"
@@ -497,6 +500,14 @@ process_issue() {
         if [[ -n "$issue_log_dir" && -f "$issue_log_dir/metrics.json" ]]; then
             log "Metrics available: $issue_log_dir/metrics.json"
         fi
+    fi
+
+    if [[ "$impl_status" == "already_implemented" ]]; then
+        log "Issue #$issue_num was already implemented in a prior run — skipping PR creation."
+        update_issue_field "$issue_num" "status" "already_done"
+        update_progress
+        git checkout "$BRANCH" 2>/dev/null || true
+        return 0
     fi
 
     if [[ "$impl_status" != "success" ]]; then
