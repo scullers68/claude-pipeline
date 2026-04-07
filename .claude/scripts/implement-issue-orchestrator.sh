@@ -998,7 +998,10 @@ handle_rate_limit() {
 # Returns empty string if skill file not found (non-fatal).
 load_skill() {
     local skill_name="$1"
-    local skill_file="$CLAUDE_PROJECT_DIR/.claude/skills/$skill_name/SKILL.md"
+    # CLAUDE_PROJECT_DIR is set by Claude Code but absent when run from batch/shell directly.
+    # Fall back to the script's own repo root so skills load correctly in both contexts.
+    local _project_dir="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    local skill_file="$_project_dir/.claude/skills/$skill_name/SKILL.md"
     if [[ -f "$skill_file" ]]; then
         cat "$skill_file"
     else
@@ -5430,10 +5433,12 @@ $impl_summary" "$tagent"
         done
 
         if [[ "$all_already_done" == "true" && "$completed_tasks" -gt 0 ]]; then
-            local commits_ahead
-            commits_ahead=$(git rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
-            if (( commits_ahead > 0 )); then
-                log "All $completed_tasks task(s) reported already_done but branch has $commits_ahead commit(s) ahead of $BASE_BRANCH — continuing to PR creation."
+            # Guard: serial conflict-retry logs report already_done=true even when new commits
+            # landed. Check for actual commits before concluding the issue was pre-implemented.
+            local _commits_check
+            _commits_check=$(git rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
+            if (( _commits_check > 0 )); then
+                log "All $completed_tasks task(s) reported already_done but branch has $_commits_check commit(s) ahead of $BASE_BRANCH — continuing to PR creation."
             else
                 log "All $completed_tasks task(s) reported already_done — issue was previously implemented."
                 comment_issue "Already Implemented" \

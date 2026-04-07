@@ -487,6 +487,21 @@ process_issue() {
                 impl_error="Unknown state: $state"
                 ;;
         esac
+
+        # Recovery: if the orchestrator exited with a non-completed state but
+        # stages.pr.pr_number was already written (PR created before crash),
+        # treat it as recoverable success. Handles the case where the script is
+        # killed or crashes after PR creation but before set_final_state("completed").
+        if [[ "$impl_status" == "error" ]]; then
+            local recovered_pr
+            recovered_pr=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
+            if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]]; then
+                log_warn "Orchestrator exited with state='$state' but PR #$recovered_pr exists — recovering as success"
+                impl_status="success"
+                pr_number="$recovered_pr"
+                impl_error=""
+            fi
+        fi
     else
         impl_error="Status file not created"
     fi
