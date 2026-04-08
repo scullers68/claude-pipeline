@@ -5392,15 +5392,23 @@ $impl_summary" "$tagent"
             "completed (with per-task quality loops)."
 
         # Guardrail: abort if no tasks completed but tasks were expected.
+        # Guard: if the branch has commits ahead of base (from a prior run or
+        # partial work), continue to PR creation instead of aborting.
         if (( completed_tasks == 0 && task_count > 0 )); then
-            log_error "ABORT: 0/$task_count tasks completed — implementation produced no changes." \
-                "This usually indicates a bug in the orchestrator (e.g. undefined variable, worktree failure)." \
-                "Check stage logs for errors."
-            comment_issue "Implementation Failed" \
-                "❌ 0/$task_count tasks completed. No changes were produced. Aborting pipeline." \
-                "error"
-            set_final_state "error"
-            exit 1
+            local commits_ahead
+            commits_ahead=$(git rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
+            if (( commits_ahead > 0 )); then
+                log_warn "0/$task_count tasks completed this run, but branch has $commits_ahead commit(s) ahead of $BASE_BRANCH — continuing to PR creation."
+            else
+                log_error "ABORT: 0/$task_count tasks completed — implementation produced no changes." \
+                    "This usually indicates a bug in the orchestrator (e.g. undefined variable, worktree failure)." \
+                    "Check stage logs for errors."
+                comment_issue "Implementation Failed" \
+                    "❌ 0/$task_count tasks completed. No changes were produced. Aborting pipeline." \
+                    "error"
+                set_final_state "error"
+                exit 1
+            fi
         fi
     fi
 
@@ -5455,7 +5463,10 @@ $impl_summary" "$tagent"
     if is_stage_completed "implement" && [[ "$branch_scope" == "config" ]]; then
         local commits_ahead
         commits_ahead=$(git rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
-        if (( commits_ahead == 0 )); then
+        if (( commits_ahead > 0 )); then
+            log "Branch has $commits_ahead commit(s) ahead of" \
+                "$BASE_BRANCH — continuing."
+        else
             log_error "ABORT: Implementation stage completed but branch has 0 commits ahead of $BASE_BRANCH." \
                 "Worktree merge-back likely failed. Check orchestrator log for merge errors."
             comment_issue "Implementation Failed" \
