@@ -2671,10 +2671,12 @@ run_task_in_worktree() {
 	while (( review_attempts < max_attempts )); do
 		review_attempts=$((review_attempts + 1))
 
+		local line_range_hint
+		line_range_hint=$(build_line_range_hint "$task_desc")
 		local impl_prompt
 		impl_prompt="${PLATFORM_PATTERNS_PREFIX}Implement task $task_id on branch $wt_branch in the current working directory:
 
-$task_desc${files_block}
+$task_desc${line_range_hint}${files_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
@@ -3403,10 +3405,12 @@ Commit your changes with a descriptive message."
 		while (( review_attempts < max_attempts )); do
 			review_attempts=$((review_attempts + 1))
 
+			local line_range_hint
+			line_range_hint=$(build_line_range_hint "$tdesc")
 			local impl_prompt
 			impl_prompt="Implement task $tid on branch $feature_branch in the current working directory:
 
-$tdesc${files_block}
+$tdesc${line_range_hint}${files_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
@@ -3535,6 +3539,30 @@ Commit your changes with a descriptive message."
 #   separator in prompt).  A "LIKELY AFFECTED FILES:" section listing
 #   deduplicated, sorted file paths when one or more are provided.
 #
+# Build a targeted read hint from a task description.
+#
+# Parses "(lines N[–-]M)" from the task description and emits a
+# "TARGETED READ:" line instructing the subagent to jump to that offset.
+# No hard read limit is imposed — subagents should read additional context
+# (adjacent functions, callers, etc.) as needed.
+#
+# Arguments:
+#   $1 - task description string
+# Outputs:
+#   A "TARGETED READ:" line when a line range is found, or empty string.
+#
+build_line_range_hint() {
+    local task_desc="$1"
+    local start_line end_line
+    if [[ "$task_desc" =~ \(lines?[[:space:]]+([0-9]+)[[:space:]]*[-–][[:space:]]*([0-9]+)\) ]]; then
+        start_line="${BASH_REMATCH[1]}"
+        end_line="${BASH_REMATCH[2]}"
+        local offset=$(( start_line - 1 ))
+        printf '\nTARGETED READ: The primary change target is around lines %s–%s — use offset=%s to jump there, then read additional context (adjacent functions, callers) as needed.\n' \
+            "$start_line" "$end_line" "$offset"
+    fi
+}
+
 build_files_block() {
     local block=$'\n'
     if [[ $# -gt 0 ]]; then
