@@ -449,7 +449,7 @@ process_issue() {
 
     local impl_exit=0
 
-    echo "=== implement-issue output ===" >> "$issue_log"
+    printf '%s\n' "=== implement-issue output ===" >> "$issue_log"
     "$SCRIPT_DIR/implement-issue-orchestrator.sh" \
         --issue "$issue_num" \
         --branch "$BRANCH" \
@@ -457,7 +457,7 @@ process_issue() {
         --status-file "$issue_status_file" \
         2>&1 | tee -a "$issue_log"
     impl_exit=${PIPESTATUS[0]}
-    echo "=== exit code: $impl_exit ===" >> "$issue_log"
+    printf '%s\n' "=== exit code: $impl_exit ===" >> "$issue_log"
 
     # Parse result from status file
     local impl_status="error"
@@ -553,7 +553,7 @@ process_issue() {
 
     local proc_exit=0
 
-    echo "=== process-pr output ===" >> "$issue_log"
+    printf '%s\n' "=== process-pr output ===" >> "$issue_log"
     timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
         --agent code-reviewer \
         --dangerously-skip-permissions \
@@ -561,9 +561,10 @@ process_issue() {
         --json-schema "$PROCESS_SCHEMA" \
         2>&1 | tee -a "$issue_log"
     proc_exit=${PIPESTATUS[0]}
-    echo "=== exit code: $proc_exit ===" >> "$issue_log"
+    printf '%s\n' "=== exit code: $proc_exit ===" >> "$issue_log"
 
     # Update session ID from last JSON line in log
+    local session_id
     session_id=$(grep -E '^\{' "$issue_log" | tail -1 | jq -r '.session_id // empty' 2>/dev/null)
     if [[ -n "$session_id" ]]; then
         update_issue_field "$issue_num" "session_id" "$session_id"
@@ -587,7 +588,7 @@ process_issue() {
         set_rate_limit "false" "" ""
 
         # Resume
-        echo "=== process-pr resume output ===" >> "$issue_log"
+        printf '%s\n' "=== process-pr resume output ===" >> "$issue_log"
         if [[ -n "$session_id" ]]; then
             timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "please continue" \
                 --resume "$session_id" \
