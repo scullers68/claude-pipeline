@@ -74,6 +74,92 @@ Claude CLI invocations:
     --json-schema process-pr.json
 ```
 
+## Per-Issue Triage & Surgical Fast-Path
+
+Inside `implement-issue-orchestrator.sh`, every issue passes through a
+**triage** stage immediately after `parse-issue`. The triage classifier
+(Haiku, ~$0.001/issue) decides one of two routes:
+
+```
+parse-issue ──► triage ──┬──► fast-path: branch → implement → commit → PR → squash-merge
+                          │                  (skips: test loop, code review, deploy verify, docs)
+                          │
+                          └──► full:      branch → implement → quality loop → review → PR → ...
+                                                  (the standard pipeline)
+```
+
+The fast-path lives in `.claude/scripts/surgical-fast-path.sh`. It is
+deliberately the bare minimum — no test iterations, no review, no docs.
+The triage classifier must be confident that a fast-path issue is safe to
+ship without those gates.
+
+### Six criteria — ALL must pass for fast-path
+
+| # | Criterion | Disqualifies on |
+|---|-----------|-----------------|
+| 1 | `test_only_scope` | any reference to `apps/`, `packages/`, `src/`, migrations |
+| 2 | `surgical_size` | > 30 lines net diff or > 3 files |
+| 3 | `established_pattern` | no grep-able regex with ≥ 3 matching files in repo |
+| 4 | `precise_specification` | missing `## Implementation Tasks` or vague file/line refs |
+| 5 | `benign_failure_mode` | wrong change could break prod, not just fail a test |
+| 6 | `no_security_concerns` | auth, RBAC, encryption, secrets, validation, CORS, sessions |
+
+Confidence must be `high`. Anything less forces `full`. The shell wrapper
+also re-runs `git grep -lE` on the classifier-supplied regex and downgrades
+to `full` when fewer than 3 files match — defense in depth on top of the
+prompt.
+
+### Example fixtures (also used by triage-validate.sh)
+
+| Fixture | Route | Why |
+|---------|-------|-----|
+| `issue-2836` quickLogin → storageState in 2 specs | fast-path | test-only, established pattern (5 prior migrations), precise |
+| `issue-2837` fix stale E2E selectors | fast-path | test-only, well-specified |
+| `issue-2838` retry/timeout tweak in E2E | fast-path | test-only, surgical |
+| `issue-2839` remove premature toBeVisible() | fast-path | test-only, single file |
+| `issue-2752` `hasBaseline` filter on `/api/farms` | full | backend code, not test-only |
+| `issue-2754` zone overlap validator fix | full | production validator code |
+| `issue-2776` `window.location.href` → `router.push()` | full | production component code |
+| `issue-auth-test` add MFA assertion to auth-flow E2E | full | security concern, even though test-only |
+| `issue-vague` "fix the timeout issue" | full | precise_specification fails |
+| `issue-novel-pattern` first use of new `withRetry` helper | full | no established pattern (< 3 grep matches) |
+
+### Operator controls
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `DISABLE_SURGICAL_FAST_PATH` | `0` | `1` forces every issue to the full pipeline regardless of classifier output. Use during incidents. |
+| `TRIAGE_MODEL` | `haiku` (tier) | Override the model. Pass a tier name (`haiku`/`sonnet`/`opus`), not a pinned model ID — the tier-to-model mapping lives in `.claude/scripts/model-config.sh`. |
+| `FAST_PATH_IMPLEMENT_MODEL` | `sonnet` | Model used by the fast-path implement step. |
+
+### Pre-commit hook failure on fast-path
+
+The fast-path commit runs hooks with no `--no-verify` bypass. If a hook
+fails, the fast-path **bails cleanly** — it does NOT fall back to the full
+pipeline. The script:
+
+1. Captures the hook's stderr (capped at 4 KB) into `triage.json.hook_failure_output`.
+2. Sets `state="failed"` and `error="pre_commit_hook_failed"` in `status.json`.
+3. Exits 1 — counted by `batch-orchestrator.sh`'s circuit breaker as a real failure.
+
+This is intentional. Falling back to `full` after a hook failure would mask
+a triage misclassification (the issue was not really fast-path-safe). A
+counted failure surface lets operators tune the criteria.
+
+### Test contract
+
+Two test layers protect the triage system. Both must stay green:
+
+- `.claude/scripts/implement-issue-test/test-surgical-fast-path.bats` —
+  18 mock-based tests covering the shell logic (kill switch, confidence
+  demotion, grep verification, status-file bookkeeping, fast-path step
+  ordering, hook-failure handling). Run via `bats`.
+- `.claude/scripts/triage-validate.sh` — real-Claude golden tests
+  (~$0.10/run, ~100s) that exercise the actual prompt against all 10
+  fixtures. **Run before merging changes to the prompt, schema, or
+  triage tier model. Run monthly to catch model drift.** Do NOT
+  auto-update the manifest when fixtures flip — investigate first.
+
 ## Process
 
 ```dot

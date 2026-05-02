@@ -314,8 +314,11 @@ init_status() {
             branch: $branch,
             current_stage: $current_stage,
             current_task: $current_task,
+            route: null,
             stages: {
                 parse_issue: {status: "pending", started_at: null, completed_at: null},
+                triage: {status: "pending", started_at: null, completed_at: null,
+                         route: null, confidence: null, disqualifying_criterion: null},
                 validate_plan: {status: "pending", started_at: null, completed_at: null},
                 implement: {status: "pending", task_progress: "0/0"},
                 quality_loop: {status: "pending", iteration: 0},
@@ -326,7 +329,10 @@ init_status() {
                 docs: {status: "pending"},
                 pr: {status: "pending"},
                 pr_review: {status: "pending", iteration: 0},
-                complete: {status: "pending"}
+                complete: {status: "pending"},
+                fast_path_implement: {status: "pending"},
+                fast_path_pr: {status: "pending"},
+                fast_path_merge: {status: "pending"}
             },
             tasks: [],
             quality_iterations: 0,
@@ -1515,6 +1521,206 @@ for m in re.finditer(r'\[\s*\{', t):
     _CONSECUTIVE_TIMEOUTS=0
     _TIMED_OUT_STAGE_NAMES=""
     printf '%s\n' "$structured"
+}
+
+# =============================================================================
+# TRIAGE STAGE
+# =============================================================================
+#
+# Classify the issue into "fast-path" (surgical, test-only, well-specified) or
+# "full" (default verification pipeline). Conservative — biases hard toward
+# "full" whenever uncertain. See .claude/skills/handle-issues/SKILL.md for the
+# six criteria and .claude/scripts/triage-validate.sh for prompt-quality tests.
+#
+# Arguments:
+#   $1 - optional path to issue body markdown (defaults to context/issue-body.md)
+#
+# Side effects:
+#   - Writes $LOG_BASE/triage.json artifact
+#   - Updates status.json: stages.triage.* and top-level .route
+#   - Sets current_stage to "triage"
+#
+# Output (stdout):
+#   - The final route string ("fast-path" or "full")
+
+build_triage_prompt() {
+    local issue_body="$1"
+    cat <<TRIAGE_PROMPT
+You are the triage classifier for an issue-implementation pipeline. Classify
+the GitHub issue below into one of two routes:
+
+  "fast-path" — surgical, test-only, well-specified change. Pipeline runs:
+                branch -> implement -> commit -> PR -> squash-merge. Skips
+                test loop, code review, deploy verify, docs.
+  "full"      — default. Runs the full verification pipeline.
+
+Be CONSERVATIVE. False negatives (missing a fast-path opportunity) cost time.
+False positives (skipping verification when it was needed) cost quality. Bias
+hard toward "full" whenever uncertain.
+
+Check ALL SIX criteria. Every criterion must be true for "fast-path". If ANY
+criterion is false, route is "full".
+
+CRITERIA:
+
+1. test_only_scope — All file paths in the issue's Implementation Tasks
+   section match: tests/**, playwright/**, **/*.spec.ts, **/*.test.ts,
+   **/*.e2e.ts. Any reference to apps/, packages/, src/, or migration files
+   disqualifies.
+
+2. surgical_size — Estimated diff under 30 lines net, across no more than
+   3 files.
+
+3. established_pattern — The change applies a pattern that already exists in
+   the codebase. Identify the pattern as a grep-able regex and place it in
+   "established_pattern_grep". The shell wrapper will run \`git grep -lE\` and
+   verify >= 3 matching files. Set to null if you cannot identify one
+   specific regex (this criterion then fails).
+
+4. precise_specification — Issue body has an "## Implementation Tasks"
+   section AND each task names specific file paths AND (line numbers OR
+   exact code snippets).
+
+5. benign_failure_mode — Worst outcome of a wrong change is "a test still
+   fails" or "a test skips" — NOT "production breaks", "data corrupts", or
+   "users see incorrect behavior". Test files always pass; production code
+   never passes.
+
+6. no_security_concerns — Skip fast-path for: auth flows, RBAC, encryption,
+   secret handling, input validation, CORS, CSP, session management, token
+   handling. Auth tests deserve review even if test-only.
+
+CONFIDENCE: high (all criteria clearly evaluated) | medium (some criteria
+required inference) | low (vague issue). If confidence is medium or low,
+route MUST be "full".
+
+OUTPUT: schema-enforced JSON with route, criteria.{test_only_scope,
+surgical_size, established_pattern, precise_specification,
+benign_failure_mode, no_security_concerns}.{passed, reason},
+established_pattern_grep, confidence, disqualifying_criterion, summary,
+status.
+
+ISSUE BODY:
+<<<
+${issue_body}
+>>>
+TRIAGE_PROMPT
+}
+
+run_triage_stage() {
+    local issue_body_file="${1:-$LOG_BASE/context/issue-body.md}"
+
+    set_stage_started "triage"
+
+    if [[ ! -f "$issue_body_file" ]]; then
+        log_error "Triage: issue body file not found: $issue_body_file"
+        # Fail safe: write a minimal triage.json marking full route, return full.
+        printf '{"route":"full","disqualifying_criterion":"issue_body_missing","kill_switch_engaged":false}\n' \
+            > "$LOG_BASE/triage.json"
+        update_stage triage completed route full
+        printf 'full\n'
+        return 0
+    fi
+
+    local issue_body prompt
+    issue_body=$(cat "$issue_body_file")
+    prompt=$(build_triage_prompt "$issue_body")
+
+    # Resolve model. TRIAGE_MODEL env var allows operator override; default
+    # falls through to model-config.sh (triage stage maps to "haiku" tier).
+    local triage_model="${TRIAGE_MODEL:-}"
+
+    local raw
+    raw=$(run_stage "triage" "$prompt" "implement-issue-triage.json" "" "" "" "$triage_model") || true
+
+    # Extract Claude's classification. If parse fails, default to full.
+    local route confidence dq pattern criteria
+    route=$(printf '%s' "$raw" | jq -r '.route // "full"')
+    confidence=$(printf '%s' "$raw" | jq -r '.confidence // "low"')
+    dq=$(printf '%s' "$raw" | jq -r '.disqualifying_criterion // empty')
+    pattern=$(printf '%s' "$raw" | jq -r '.established_pattern_grep // empty')
+    criteria=$(printf '%s' "$raw" | jq -c '.criteria // {}')
+
+    # Post-processing: defense in depth on top of the prompt.
+    local kill_switch_engaged=false
+    local pattern_grep_count=0
+
+    # 1. Kill switch: forces full regardless of Claude's decision.
+    if [[ "${DISABLE_SURGICAL_FAST_PATH:-0}" == "1" ]]; then
+        if [[ "$route" == "fast-path" ]]; then
+            dq="kill_switch"
+        fi
+        route="full"
+        kill_switch_engaged=true
+    fi
+
+    # 2. Confidence demotion: medium/low forces full.
+    if [[ "$kill_switch_engaged" == "false" && "$route" == "fast-path" ]]; then
+        if [[ "$confidence" != "high" ]]; then
+            route="full"
+            dq="confidence_low"
+        fi
+    fi
+
+    # 3. Pattern grep verification: requires >= 3 matching files.
+    if [[ "$kill_switch_engaged" == "false" && "$route" == "fast-path" ]]; then
+        if [[ -z "$pattern" || "$pattern" == "null" ]]; then
+            route="full"
+            dq="established_pattern"
+        elif [[ "$pattern" == *$'\n'* ]]; then
+            # Reject multi-line patterns. POSIX/BSD/GNU grep treats embedded
+            # newlines as alternation, so a malformed pattern like
+            # "storageState\n." would falsely match arbitrary files.
+            route="full"
+            dq="established_pattern"
+        else
+            # Run from BASE_BRANCH worktree if available; otherwise current dir.
+            pattern_grep_count=$(git grep -lE -- "$pattern" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+            if (( pattern_grep_count < 3 )); then
+                route="full"
+                dq="established_pattern"
+            fi
+        fi
+    fi
+
+    # Write triage.json artifact (always, for both routes — auditable record).
+    local artifact="$LOG_BASE/triage.json"
+    jq -n \
+        --arg route "$route" \
+        --arg confidence "$confidence" \
+        --arg dq "${dq:-}" \
+        --arg pattern "${pattern:-}" \
+        --argjson criteria "${criteria:-\{\}}" \
+        --argjson grep_count "$pattern_grep_count" \
+        --argjson kill_switch "$kill_switch_engaged" \
+        --arg summary "$(printf '%s' "$raw" | jq -r '.summary // ""')" \
+        '{
+            route: $route,
+            confidence: $confidence,
+            disqualifying_criterion: (if $dq == "" then null else $dq end),
+            established_pattern_grep: (if $pattern == "" or $pattern == "null" then null else $pattern end),
+            pattern_grep_count: $grep_count,
+            kill_switch_engaged: $kill_switch,
+            criteria: $criteria,
+            summary: $summary,
+            timestamp: (now | todate)
+        }' > "$artifact"
+
+    # Update status.json: triage stage details + top-level route field.
+    jq --arg route "$route" \
+       --arg confidence "$confidence" \
+       --arg dq "${dq:-}" \
+       '.stages.triage.route = $route |
+        .stages.triage.confidence = $confidence |
+        .stages.triage.disqualifying_criterion = (if $dq == "" then null else $dq end) |
+        .route = $route |
+        .last_update = (now | todate)' \
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+    set_stage_completed "triage"
+    log "Triage complete. Route: $route (confidence: $confidence, dq: ${dq:-none}, kill_switch: $kill_switch_engaged)"
+
+    printf '%s\n' "$route"
 }
 
 # =============================================================================
@@ -5048,6 +5254,25 @@ $excerpt
         set_stage_completed "parse_issue"
         log "Parse issue complete. Branch: $branch, Tasks: $task_count"
     fi
+
+    # -------------------------------------------------------------------------
+    # STAGE: TRIAGE (classify route — fast-path or full)
+    # -------------------------------------------------------------------------
+    local triage_route
+    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "triage"; then
+        triage_route=$(jq -r '.route // "full"' "$STATUS_FILE")
+        log "Skipping triage stage (already completed). Route: $triage_route"
+    else
+        triage_route=$(run_triage_stage)
+    fi
+
+    if [[ "$triage_route" == "fast-path" ]]; then
+        log "Triage routes to surgical fast-path. Handing off to surgical-fast-path.sh"
+        export STATUS_FILE LOG_BASE ISSUE_NUMBER BASE_BRANCH SCHEMA_DIR CLAUDE_CLI
+        export BRANCH="${branch:-$(jq -r '.branch // ""' "$STATUS_FILE")}"
+        exec "$SCRIPT_DIR/surgical-fast-path.sh"
+    fi
+    log "Triage routes to full pipeline."
 
     # -------------------------------------------------------------------------
     # PIPELINE PROFILE: classify complexity now that task sizes are known

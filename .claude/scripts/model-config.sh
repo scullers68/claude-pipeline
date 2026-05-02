@@ -42,6 +42,7 @@ _stage_to_tier() {
 	case "$1" in
 		parse-issue)    printf '%s' "light" ;;
 		validate-plan)  printf '%s' "light" ;;
+		triage)         printf '%s' "light" ;;
 		implement)      printf '%s' "standard" ;;
 		task-review)    printf '%s' "standard" ;;
 		fix)            printf '%s' "standard" ;;
@@ -101,6 +102,7 @@ if [[ -z "${_STAGE_PREFIXES+set}" ]]; then
 		fix-acceptance-test acceptance-test validate-plan
 		fix-deploy-verify deploy-verify spec-review code-review task-review parse-issue e2e-verify
 		pr-review implement simplify research complete pr-fix fix-e2e review test-iter test docs fix pr
+		triage
 	)
 fi
 

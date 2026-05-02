@@ -53,6 +53,7 @@ watch -n 5 'jq -c "{state,stage:.current_stage,task:.current_task,quality:.quali
 |-------|-------|-------------|
 | parse-issue | default | read issue body, extract implementation tasks |
 | validate-plan | default | verify referenced files/patterns still exist |
+| triage | default (Haiku) | classify route: `fast-path` (surgical, test-only) or `full` (default) — see handle-issues SKILL for the six criteria |
 | implement | per-task | execute each task from GH issue task list |
 | task-review | spec-reviewer | verify task achieved goal |
 | fix | per-task | address review findings |
