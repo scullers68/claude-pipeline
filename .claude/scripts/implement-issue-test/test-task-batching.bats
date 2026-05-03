@@ -483,8 +483,8 @@ teardown() {
 			"$sha" > "$result_file"
 		return 0
 	}
-	# extract_task_size is called within execute_batch_parallel
-	# (not inside the subshell) so it works without export
+	export -f run_task_in_worktree
+	export -f extract_task_size 2>/dev/null || true
 
 	# Two non-overlapping tasks
 	local tasks result
@@ -774,6 +774,8 @@ _setup_parallel_stage_mocks() {
 			"$sha" > "$result_file"
 	}
 	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
 
 	local tasks
 	tasks='[{"id":8,"description":"Modify src.ts","agent":"default","batch":1}]'
@@ -825,6 +827,8 @@ _setup_parallel_stage_mocks() {
 			"$sha" > "$result_file"
 	}
 	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
 
 	# Two tasks both touching shared.ts will cause a merge conflict
 	# on the second merge.  We run them one at a time in the simplest setup:
@@ -948,6 +952,8 @@ _setup_parallel_stage_mocks() {
 		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
 			"$sha" > "$result_file"
 	}
+	export -f run_task_in_worktree
+	export -f extract_task_size
 
 	local par_result
 	par_result=$(execute_batch_parallel 1 \
