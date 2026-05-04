@@ -266,6 +266,9 @@ Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
 ## Description
 $EXTRACTED_DESCRIPTION
 
+## Implementation Tasks
+- [ ] `[default]` **(S)** $INFERRED_TASK_DESCRIPTION
+
 ## References
 - Parent Issue: #$ISSUE_NUMBER
 - PR/MR: #$PR_NUMBER
