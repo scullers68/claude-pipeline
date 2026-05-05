@@ -330,6 +330,88 @@ next_stage_log() {
 }
 
 # =============================================================================
+# STRUCTURED EVENT EMISSION
+# =============================================================================
+#
+# emit_event <event_type> [key=value ...]
+#
+# Builds a JSON envelope with ts/run_id/event/stage and forwards it to
+# event-emit.sh, which validates against schemas/pipeline-event.json and
+# appends one JSONL line to $LOG_BASE/events.jsonl under flock.
+#
+# Design notes:
+#   - Parallel to existing text logs: every text-log call site that maps to one
+#     of the 8 event types (stage_start, stage_end, escalation, retry,
+#     model_call, rate_limit_hit, schema_validation_fail, status_change) gets
+#     a parallel emit_event call.  Text logs are retained verbatim for human
+#     debugging — see issue #180.
+#   - Safe-by-default: silently no-ops when event-emit.sh is missing or
+#     LOG_BASE is unset (e.g. during early init or when the helper has not yet
+#     landed in this branch).  A schema-invalid emit exits non-zero from
+#     event-emit.sh but never crashes the orchestrator (stderr-redirected,
+#     `|| true`).
+#   - run_id is derived from the LOG_BASE basename which already encodes
+#     issue+timestamp (e.g. "issue-180-20260502-183541").
+emit_event() {
+    local event_type="$1"
+    shift
+
+    # Parallel-task safety: if the helper hasn't been added yet (sub-issue
+    # tasks land out of order), skip silently rather than break the pipeline.
+    local emit_script="$SCRIPT_DIR/event-emit.sh"
+    if [[ ! -x "$emit_script" ]]; then
+        return 0
+    fi
+
+    # Skip if LOG_BASE isn't established yet (very early init paths).
+    if [[ -z "${LOG_BASE:-}" ]]; then
+        return 0
+    fi
+
+    local run_id="${LOG_BASE##*/}"
+
+    local -a jq_args=(
+        --arg ts "$(date -Iseconds)"
+        --arg run_id "$run_id"
+        --arg event "$event_type"
+    )
+    local filter='{ts: $ts, run_id: $run_id, event: $event}'
+
+    local kv key value safe_key json_value
+    for kv in "$@"; do
+        # Support `key:=value` for JSON-typed values (numbers, booleans, null)
+        # in addition to `key=value` for strings. Required because the schema
+        # types fields like attempt/max_attempts/stage_attempt as integer.
+        if [[ "$kv" == *":="* ]]; then
+            key="${kv%%:=*}"
+            value="${kv#*:=}"
+            json_value=true
+        else
+            key="${kv%%=*}"
+            value="${kv#*=}"
+            json_value=false
+        fi
+        # Defensive: only allow alphanumeric/underscore in keys to keep the
+        # generated jq filter safe.
+        safe_key="${key//[^A-Za-z0-9_]/}"
+        if [[ -z "$safe_key" ]]; then
+            continue
+        fi
+        if $json_value; then
+            jq_args+=(--argjson "$safe_key" "$value")
+        else
+            jq_args+=(--arg "$safe_key" "$value")
+        fi
+        filter+=" | .${safe_key} = \$${safe_key}"
+    done
+
+    local event_json
+    event_json=$(jq -nc "${jq_args[@]}" "$filter" 2>/dev/null) || return 0
+
+    LOG_DIR="$LOG_BASE" "$emit_script" "$event_json" >/dev/null 2>>"$LOG_BASE/orchestrator.log" || true
+}
+
+# =============================================================================
 # STATUS FILE MANAGEMENT
 # =============================================================================
 
@@ -412,6 +494,7 @@ update_stage() {
 
 set_stage_started() {
     local stage="$1"
+    local model="${2:-}"
     jq --arg stage "$stage" \
        '.stages[$stage].started_at = (now | todate) |
         .stages[$stage].status = "in_progress" |
@@ -421,6 +504,15 @@ set_stage_started() {
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
+
+    # Resolve the model so the stage_start event satisfies the schema's
+    # required `model` field. If effective_model isn't usable yet, fall back
+    # to a stable placeholder so the event still validates.
+    if [[ -z "$model" ]]; then
+        model=$(effective_model "$stage" "" 2>/dev/null) || model=""
+        [[ -n "$model" ]] || model="unresolved"
+    fi
+    emit_event "stage_start" "stage=$stage" "model=$model"
 }
 
 set_stage_completed() {
@@ -431,6 +523,9 @@ set_stage_completed() {
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
+    # Schema enum for stage_end.status is ["success","error","rate_limit"];
+    # "completed" is the status.json column name, not the event-stream value.
+    emit_event "stage_end" "stage=$stage" "status=success"
 }
 
 record_escalation() {
@@ -447,6 +542,11 @@ record_escalation() {
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
+    emit_event "escalation" \
+        "stage=$stage" \
+        "from_model=$from_model" \
+        "to_model=$to_model" \
+        "reason=$reason"
 }
 
 update_task() {
@@ -485,10 +585,22 @@ set_branch_info() {
 
 set_final_state() {
     local state="$1"
+    local prev_state stage
+    # Capture the previous state and current stage BEFORE we overwrite, so the
+    # status_change event can carry from_state/to_state per schema.
+    prev_state=$(jq -r '.state // "running"' "$STATUS_FILE" 2>/dev/null) \
+        || prev_state="running"
+    stage=$(jq -r '.current_stage // "unknown"' "$STATUS_FILE" 2>/dev/null) \
+        || stage="unknown"
+
     jq --arg state "$state" \
        '.state = $state | .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
+    emit_event "status_change" \
+        "stage=$stage" \
+        "from_state=$prev_state" \
+        "to_state=$state"
 }
 
 increment_quality_iteration() {
@@ -1029,6 +1141,10 @@ handle_rate_limit() {
     resume_at=$(date -Iseconds -d "+${wait_time} seconds" 2>/dev/null || date -v+${wait_time}S -Iseconds 2>/dev/null)
 
     log "Rate limit hit. Waiting ${wait_time}s until $resume_at"
+    emit_event "rate_limit_hit" \
+        "stage=${_RUN_STAGE_NAME:-}" \
+        "retry_after_seconds:=$wait_time" \
+        "resume_at=${resume_at:-}"
     sleep "$wait_time"
 }
 
@@ -1197,6 +1313,10 @@ run_stage() {
     local timeout_override="${6:-}"   # optional: override stage timeout (seconds)
     local model_override="${7:-}"    # optional: override model (haiku|sonnet|opus)
 
+    # Track stage in a global so handle_rate_limit() (called from inside this
+    # function) can attribute its rate_limit_hit event to the right stage.
+    _RUN_STAGE_NAME="$stage_name"
+
     local stage_log="$LOG_BASE/stages/$(next_stage_log "$stage_name")"
 
     # Stage result accumulator — every exit point funnels through
@@ -1209,6 +1329,10 @@ run_stage() {
     # Validate schema file exists
     if [[ ! -f "$SCHEMA_DIR/$schema_file" ]]; then
         log_error "Schema file not found: $SCHEMA_DIR/$schema_file"
+        emit_event "schema_validation_fail" \
+            "stage=$stage_name" \
+            "reason=schema_not_found" \
+            "schema_file=$schema_file"
         _CONSECUTIVE_TIMEOUTS=0
         _TIMED_OUT_STAGE_NAMES=""
         local _sr
@@ -1254,6 +1378,15 @@ run_stage() {
         log "  Complexity: $complexity"
     fi
     log "  Log: $stage_log"
+
+    emit_event "model_call" \
+        "stage=$stage_name" \
+        "model=$model" \
+        "fallback_model=$fallback_model" \
+        "agent=${agent:-default}" \
+        "schema=$schema_file" \
+        "complexity=${complexity:-}" \
+        "stage_attempt:=1"
 
     local -a agent_args=()
     if [[ -n "$agent" ]]; then
@@ -1367,6 +1500,23 @@ run_stage() {
         log "WARN: Stage $stage_name timed out after ${stage_timeout}s — retrying with ${retry_timeout}s timeout"
         printf '%s\n' "=== $stage_name timeout retry (${retry_timeout}s) ===" >> "$stage_log"
 
+        emit_event "retry" \
+            "stage=$stage_name" \
+            "reason=timeout" \
+            "attempt:=2" \
+            "max_attempts:=2" \
+            "model=$model" \
+            "previous_timeout=$stage_timeout" \
+            "retry_timeout=$retry_timeout"
+        emit_event "model_call" \
+            "stage=$stage_name" \
+            "model=$model" \
+            "fallback_model=$fallback_model" \
+            "agent=${agent:-default}" \
+            "schema=$schema_file" \
+            "complexity=${complexity:-}" \
+            "stage_attempt:=2"
+
         exit_code=0
         output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
@@ -1398,6 +1548,15 @@ run_stage() {
                 if [[ "$timeout_esc_fallback" != "$timeout_escalated_model" ]]; then
                     timeout_esc_fallback_args=(--fallback-model "$timeout_esc_fallback")
                 fi
+
+                emit_event "model_call" \
+                    "stage=$stage_name" \
+                    "model=$timeout_escalated_model" \
+                    "fallback_model=$timeout_esc_fallback" \
+                    "agent=${agent:-default}" \
+                    "schema=$schema_file" \
+                    "complexity=${complexity:-}" \
+                    "stage_attempt:=3"
 
                 exit_code=0
                 output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
@@ -1473,6 +1632,15 @@ run_stage() {
             escalated_fallback_args=(--fallback-model "$escalated_fallback")
         fi
 
+        emit_event "model_call" \
+            "stage=$stage_name" \
+            "model=$escalated_model" \
+            "fallback_model=$escalated_fallback" \
+            "agent=${agent:-default}" \
+            "schema=$schema_file" \
+            "complexity=${complexity:-}" \
+            "stage_attempt:=2"
+
         output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
             --model "$escalated_model" \
@@ -1494,6 +1662,21 @@ run_stage() {
     if detect_rate_limit "$output"; then
         handle_rate_limit "$output"
         # Retry
+        emit_event "retry" \
+            "stage=$stage_name" \
+            "reason=rate_limit" \
+            "attempt:=2" \
+            "max_attempts:=2" \
+            "model=$model"
+        emit_event "model_call" \
+            "stage=$stage_name" \
+            "model=$model" \
+            "fallback_model=$fallback_model" \
+            "agent=${agent:-default}" \
+            "schema=$schema_file" \
+            "complexity=${complexity:-}" \
+            "stage_attempt:=2"
+
         output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
             --model "$model" \
@@ -1607,6 +1790,16 @@ for m in re.finditer(r'\[\s*\{', t):
         local empty_escalated_model
         empty_escalated_model=$(effective_fallback "$model")
 
+        # The CLI completed but produced no parseable structured output. From
+        # the orchestrator's perspective this is a schema-shaped failure of the
+        # stage's contract, so emit schema_validation_fail in addition to the
+        # escalation that follows.
+        emit_event "schema_validation_fail" \
+            "stage=$stage_name" \
+            "reason=no_structured_output" \
+            "model=$model" \
+            "schema=$schema_file"
+
         if [[ "$empty_escalated_model" != "$model" ]]; then
             log "WARN: No structured output from $stage_name with $model — escalating to $empty_escalated_model"
             printf '%s\n' "=== $stage_name empty output escalation: $model → $empty_escalated_model ===" >> "$stage_log"
@@ -1619,6 +1812,15 @@ for m in re.finditer(r'\[\s*\{', t):
             if [[ "$empty_esc_fallback" != "$empty_escalated_model" ]]; then
                 empty_esc_fallback_args=(--fallback-model "$empty_esc_fallback")
             fi
+
+            emit_event "model_call" \
+                "stage=$stage_name" \
+                "model=$empty_escalated_model" \
+                "fallback_model=$empty_esc_fallback" \
+                "agent=${agent:-default}" \
+                "schema=$schema_file" \
+                "complexity=${complexity:-}" \
+                "stage_attempt:=2"
 
             local empty_esc_exit_code=0
             output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
@@ -1675,6 +1877,11 @@ for m in re.finditer(r'\[\s*\{', t):
         fi
 
         log_error "No structured output from $stage_name"
+        emit_event "schema_validation_fail" \
+            "stage=$stage_name" \
+            "reason=no_structured_output_after_escalation" \
+            "model=$model" \
+            "schema=$schema_file"
         _CONSECUTIVE_TIMEOUTS=0
         _TIMED_OUT_STAGE_NAMES=""
         local _sr
@@ -1733,6 +1940,15 @@ for m in re.finditer(r'\[\s*\{', t):
                 if [[ "$struct_err_esc_fallback" != "$struct_err_escalated_model" ]]; then
                     struct_err_esc_fallback_args=(--fallback-model "$struct_err_esc_fallback")
                 fi
+
+                emit_event "model_call" \
+                    "stage=$stage_name" \
+                    "model=$struct_err_escalated_model" \
+                    "fallback_model=$struct_err_esc_fallback" \
+                    "agent=${agent:-default}" \
+                    "schema=$schema_file" \
+                    "complexity=${complexity:-}" \
+                    "stage_attempt:=2"
 
                 local struct_err_esc_exit_code=0
                 output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
