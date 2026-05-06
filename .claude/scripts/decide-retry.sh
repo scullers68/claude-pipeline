@@ -56,6 +56,10 @@ _max_retries() {
 		no_structured_output) printf '1' ;;
 		timeout)              printf '1' ;;
 		structured_error)     printf '1' ;;
+		# Known non-retriable errors: escalate or bail immediately.
+		# Listed explicitly so new error_kinds don't silently inherit 0-retry
+		# behaviour — add an entry here when extending the error_kind enum.
+		max_turns_exhausted|quality_stall) printf '0' ;;
 		# Unknown error_kind: fail closed — 0 retries causes immediate bail.
 		# This prevents silent retries when the policy table has no entry for
 		# an unrecognised class.
