@@ -81,13 +81,14 @@ git diff HEAD~1 -- .claude/agents/ .claude/skills/ .claude/config/
 
 ## What's Inside
 
-- **26 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
+- **38 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
 - **8 specialized agents** (backend/frontend developers, reviewers, validators, Playwright test developer, orchestration writer)
 - **12 platform wrapper scripts** for GitHub/GitLab/Jira abstraction (including format converters)
 - **2 hooks** for session initialization and post-PR simplification
 - **2 orchestration scripts** for batch issue processing and end-to-end implementation
 - **13 JSON schemas** for structured output at each pipeline stage
-- **30 BATS test files** across orchestrator and platform wrapper test suites
+- **42 BATS test files** across orchestrator and platform wrapper test suites
+- **6 decision and validation scripts** (`decide-action.sh`, `decide-retry.sh`, `decide-model-fallback.sh`, `skill-validate.sh`, `skill-golden-lib.sh`, `skill-golden.sh`) bridging bash orchestration and skill-native policy evaluation
 - **Quality gates** at every stage: spec compliance, code quality, test validation, acceptance testing
 
 ## Architecture
@@ -115,6 +116,7 @@ The `implement-issue-orchestrator.sh` (~5,000 lines) runs 11 stages per issue:
 |-------|-----------|-------------|
 | `parse_issue` | light (haiku) | Fetch issue body, extract tasks via fuzzy parser, compute batch assignments |
 | `validate_plan` | light (haiku) | Verify agent names exist, check file paths, warn on oversized tasks |
+| `triage` | light (haiku) | Classify issue as fast-path (surgical: no quality/test loops) or full (standard pipeline) via triage-classify skill |
 | `implement` | standard (sonnet) | Execute tasks in dependency-aware batches (serial or parallel via worktrees) |
 | `quality_loop` | mixed | Iterative simplify → review → fix cycle (up to 3 iterations) |
 | `test_loop` | mixed | Smart test targeting with convergence detection (stops on repeated failures) |
@@ -140,6 +142,7 @@ handle-issues (skill) → batch-orchestrator.sh
 
 ### Key Orchestrator Features
 
+- **Skill-native triage** — each issue is classified before implementation; fast-path skips quality and test loops for surgical single-file changes
 - **Fuzzy task parsing** — handles missing backticks, asterisk bullets, leading whitespace, and missing square brackets with warnings
 - **Task batching** — tasks with non-overlapping file sets are grouped into parallel batches; tasks sharing files run sequentially
 - **Worktree parallelism** — parallel batches execute in isolated git worktrees and merge back
@@ -165,16 +168,17 @@ The orchestrator classifies each run into a profile based on task complexity, th
 | Category | Skills | Purpose |
 |----------|--------|---------|
 | **Discovery** | explore, investigating-codebase-for-user-stories | Turn ideas into fully-planned issues |
-| **Process** | brainstorming, TDD, systematic-debugging, writing-plans, dispatching-parallel-agents | Enforce discipline and methodology |
-| **Workflow** | handle-issues, implement-issue, process-pr, subagent-driven-development, executing-plans | Automate multi-step development workflows |
+| **Process** | brainstorming, TDD, systematic-debugging, writing-plans, dispatching-parallel-agents, test-validation | Enforce discipline and methodology |
+| **Workflow** | handle-issues, implement-issue, process-pr, subagent-driven-development, executing-plans, fix-from-review, pr-review, pr-creation, complete-summary | Automate multi-step development workflows |
 | **Domain** | bulletproof-frontend, ui-design-fundamentals, write-docblocks, review-ui, playwright-testing | Tech-stack-specific guidance |
 | **Reference** | mcp-tools, using-skills | Tool selection and skill discovery |
-| **Meta** | writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop, create-session-summary, resume-session | Maintain and extend the pipeline itself |
+| **Pipeline Policy** | escalation-policy, retry-policy, model-fallback, triage-classify | Document when to escalate/retry/bail and which model to use next — evaluated by decide-*.sh scripts |
+| **Meta** | writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop, create-session-summary, resume-session, pipeline-feedback, pipeline-recovery, pipeline-sync | Maintain and extend the pipeline itself |
 | **Utility** | using-git-worktrees | Workspace isolation for feature work |
 
 ### Model Configuration
 
-The pipeline uses a three-tier model abstraction (`model-config.sh`) that decouples stages from specific model names:
+The pipeline uses a three-tier model abstraction (`model-config.sh`) — **pure data** — lookup arrays for tier/model/stage mappings only; no decision branches — that decouples stages from specific model names:
 
 | Tier | Model | Used For |
 |------|-------|----------|
@@ -183,6 +187,16 @@ The pipeline uses a three-tier model abstraction (`model-config.sh`) that decoup
 | **advanced** | opus | Deep reasoning: complex implementation (L-complexity tasks), unknown stages |
 
 Task complexity hints (`S`/`M`/`L`) from issue parsing override stage defaults — S and M use sonnet, L uses opus. Light-tier stages always use haiku regardless of complexity.
+
+#### Decision layer
+
+The three decision scripts read from `model-config.sh` and apply policy logic:
+
+| Script | Companion skill |
+|--------|----------------|
+| `decide-action.sh` | `escalation-policy` |
+| `decide-retry.sh` | `retry-policy` |
+| `decide-model-fallback.sh` | `model-fallback` |
 
 ## Orchestrator Features
 
@@ -412,6 +426,20 @@ After resolving a bug or observing a recurring problem:
 > /improvement-loop
 ```
 
+### Skill Frontmatter
+
+All 38 skills carry structured YAML frontmatter that makes their contracts machine-readable:
+
+```yaml
+inputs: [issue_number, base_branch]
+outputs: [pr_url, branch_name]
+side_effects: [github_comments, git_push]
+composes: [brainstorming, test-driven-development]
+failure_modes: [api_timeout, merge_conflict]
+```
+
+A pre-commit hook (`skill-validate.sh`) validates every skill file against this schema before it can be committed, preventing undocumented inputs, outputs, or side effects from entering the pipeline.
+
 ## Hooks
 
 - **Session Start** (`hooks/session-start.sh`): Injects `using-skills` into every conversation
@@ -420,7 +448,7 @@ After resolving a bug or observing a recurring problem:
 ## Testing
 
 ```bash
-# Orchestrator tests (23 test files, ~930 tests)
+# Orchestrator tests (35 test files, ~930 tests)
 cd .claude/scripts/implement-issue-test
 ./run-tests.sh
 
@@ -428,6 +456,8 @@ cd .claude/scripts/implement-issue-test
 cd .claude/scripts/platform-test
 ./run-tests.sh
 ```
+
+Decision skill tests use a golden-fixture harness (`skill-golden-lib.sh`) with mock Claude to verify escalation-policy, retry-policy, model-fallback, and triage-classify outputs without live API calls.
 
 Test coverage includes: argument parsing, branch verification, comment helpers, constants, deploy verification, environment error detection, metrics export, fuzzy task parsing, helper functions, integration, JSON parsing, model config, pipeline profiles, PR review config, prompt file lists, quality loop, rate limiting, smart test targeting, stage runner, status functions, task batching, timeout escalation, and verdict parsing.
 
