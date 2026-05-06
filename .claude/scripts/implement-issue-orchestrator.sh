@@ -1565,14 +1565,10 @@ run_stage() {
     output_subtype=$(printf '%s' "$output" | jq -r '.subtype // empty' 2>/dev/null)
 
     # Detect permission denials early (needed for structured-error classification)
-    # NOTE: This extracts a comma-joined string for use in human-readable log_warn
-    # messages below.  The _extract_denials() calls inside _emit_stage_result
-    # return a JSON array for the stage_result envelope — two different formats
-    # for two different consumers; both are intentional.
+    # Produces a comma-joined string for human-readable log_warn messages below.
     local _permission_denials
-    _permission_denials=$(printf '%s' "$output" \
-        | jq -r '[.permission_denials[]?.tool_name // empty] | select(length > 0) | join(", ")' \
-        2>/dev/null || true)
+    _permission_denials=$(_extract_denials "$output" \
+        | jq -r 'select(length > 0) | join(", ")' 2>/dev/null || true)
 
     # Extract structured output from the run
     local structured
@@ -1809,6 +1805,8 @@ for m in re.finditer(r'\[\s*\{', t):
             printf '%s\n' "$output" >> "$stage_log"
             printf '%s\n' \
                 "=== escalation exit code: $_esc_exit_code ===" >> "$stage_log"
+            (( _esc_exit_code != 0 )) && \
+                log_warn "escalation CLI exited $_esc_exit_code"
 
             # Extract output from the escalated run
             local _esc_structured
