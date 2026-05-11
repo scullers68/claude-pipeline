@@ -248,6 +248,29 @@ Scan all review comments for indicators of follow-up work:
 - "nice to have:"
 - "consider adding:"
 
+**Follow-up classification — determine type before extracting:**
+
+| Classification | Criteria | Action |
+|---|---|---|
+| **precise** | References a specific file or function AND covers ≤2 files in scope | Create issue immediately — enough context to implement |
+| **vague** | No file/function reference, broad scope, or uses open-ended trigger phrases alone | Attempt to expand via /explore; fall back to direct create with needs-explore label if /explore fails |
+
+Open-ended trigger phrases that signal a **vague** follow-up (do not auto-create):
+`"consider adding:"`, `"nice to have:"`, `"future improvement:"`, `"we could also..."`
+
+Examples:
+
+```
+# PRECISE — create issue
+"follow-up needed: extract retry logic in scripts/merge-mr.sh:handle_merge() into a shared helper"
+"technical debt: auth/token.sh:validate_token doesn't handle clock skew — add leeway param"
+
+# VAGUE — skip, do not auto-create
+"consider adding more tests"
+"future improvement: better error handling throughout"
+"nice to have: improve logging"
+```
+
 **Extract for each:**
 - Title (short description)
 - Body (full context from comment)
@@ -284,7 +307,9 @@ Task 1: $INFERRED_TASK_DESCRIPTION
 Task 2: $INFERRED_TASK_DESCRIPTION
 ```
 
-For each extracted issue (after deduplication check passes):
+For each extracted issue (after deduplication check passes), route by classification:
+
+**Precise follow-up** — create issue immediately:
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
@@ -307,6 +332,40 @@ EOF
 ```
 
 Log each: `Created follow-up issue #XXX: "$TITLE"`
+
+**Vague follow-up** — invoke `/explore` to flesh out context before creating the issue:
+
+```bash
+PLATFORM_DIR=".claude/scripts/platform"
+
+# Attempt to expand the vague item via /explore
+EXPLORE_OUTPUT=$(claude --dangerously-skip-permissions --print "/explore $(printf '%s' "$EXTRACTED_DESCRIPTION")" 2>&1)
+EXPLORE_EXIT=$?
+
+if [ $EXPLORE_EXIT -eq 0 ]; then
+  # /explore succeeded — it creates a fully-formed issue internally; log and continue
+  echo "Explored and created issue from vague item: \"$ISSUE_TITLE\""
+else
+  # /explore failed — fall back to direct creation with needs-explore label
+  echo "Warning: /explore failed (exit $EXPLORE_EXIT) for \"$ISSUE_TITLE\"; falling back to direct create with needs-explore label"
+  "$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
+## Context
+Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
+
+## Description
+$EXTRACTED_DESCRIPTION
+
+> **Note:** This item was classified as vague. The /explore subprocess failed to expand it.
+> A human should research and flesh out the implementation tasks before acting on this issue.
+
+## References
+- Parent Issue: #$ISSUE_NUMBER
+- PR/MR: #$PR_NUMBER
+- Reviewer: @$REVIEWER
+EOF
+)" --labels "${LABELS:+$LABELS,}needs-explore"
+fi
+```
 
 ---
 
