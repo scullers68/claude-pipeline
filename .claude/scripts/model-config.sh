@@ -166,6 +166,86 @@ readonly -a _STAGE_PREFIXES=(
 # =============================================================================
 
 # =============================================================================
+# PER-LOOP WALL-CLOCK BUDGETS
+# =============================================================================
+#
+# The PR-review loop has its own wall-clock budget so it cannot be starved by
+# earlier stages consuming the global MAX_ORCHESTRATOR_WALL_TIME budget.
+# The budget is derived from the diff-size-scaled per-iteration timeout, so
+# "at least one full iteration completes" is structurally guaranteed.
+#
+# PR-review loop budget:
+#   Formula:  pr_review_timeout × max(profile_max_iter, 1)
+#               + PR_REVIEW_WALL_TIME_SLACK
+#   Default:  2520s  (1200 × 2 + 120; covers a 200+ line diff at full
+#                     iterations with the default 120s slack)
+#   Env vars:
+#     PR_REVIEW_WALL_BUDGET      — full override (seconds); when set,
+#                                  replaces the formula entirely
+#     PR_REVIEW_WALL_TIME_SLACK  — slack added on top of the per-iteration
+#                                  budget (default 120s)
+#
+#   pr_review_timeout and profile_max_iter both come from get_pr_review_config()
+#   + apply_profile_to_pr_review_max_iter() — they scale with diff size:
+#     <50 lines  → 360s,  max_iter=1 (fixed)           → budget = 360  + slack
+#     <200 lines → 600s,  max_iter=MAX_PR_REVIEW_ITERATIONS → budget = 600  × max(iter,1) + slack
+#     200+ lines → 1200s, max_iter=MAX_PR_REVIEW_ITERATIONS → budget = 1200 × max(iter,1) + slack
+#   For minimal pipeline profile, max_iter is capped at 1 regardless of diff size.
+#   The default 2520s covers the worst case (200+ line diff, 2 iterations,
+#   120s slack).  On smaller diffs the computed budget is tighter.
+#   PR_REVIEW_WALL_BUDGET overrides the computed value entirely when set.
+#
+#   This budget is checked IN ADDITION TO the global clock — the loop exits
+#   when either guard fires.  Within its own budget, the loop is protected
+#   from global-clock exhaustion caused by earlier stages.
+#
+# Test loop budget:
+#   Formula:  test_iter_timeout × max(TEST_LOOP_PLANNED_ITERATIONS, 1)
+#               + TEST_ITER_WALL_TIME_SLACK
+#   Default:  2820s  (900 × 3 + 120; covers 3 full test iterations with
+#                     the default 120s slack)
+#   Env vars:
+#     TEST_LOOP_WALL_BUDGET          — full override (seconds); when set,
+#                                      replaces the formula entirely
+#     TEST_LOOP_PLANNED_ITERATIONS   — sane planned iteration count used
+#                                      in the formula (default 3; intentionally
+#                                      smaller than MAX_TEST_ITERATIONS=7)
+#     TEST_ITER_WALL_TIME_SLACK      — slack added on top of the per-iteration
+#                                      budget (default 120s)
+#
+#   test_iter_timeout comes from get_stage_timeout("test-iter") = 900s.
+#   TEST_LOOP_PLANNED_ITERATIONS defaults to 3 — a sane expected iteration
+#   count that is structurally smaller than the hard cap MAX_TEST_ITERATIONS=7.
+#   Operators can raise it via env without changing the hard cap.
+#
+#   This budget is checked IN ADDITION TO the global clock — the loop exits
+#   when either guard fires.  Within its own budget, the loop is protected
+#   from global-clock exhaustion caused by earlier stages.
+#
+# Global orchestrator wall-clock budget (MAX_ORCHESTRATOR_WALL_TIME):
+#   Default = sum of all per-phase budgets so the global cap never fires
+#   while an inner loop is within its own budget.
+#   Formula: calc_orchestrator_wall_time()
+#     = calc_test_loop_budget()
+#       + PR-review worst-case (1200s × max(MAX_PR_REVIEW_ITERATIONS,1)
+#                               + PR_REVIEW_WALL_TIME_SLACK)
+#       + overhead (validate_plan 1800 + implement 1800 + task-review 900
+#                   + test 600 + pr-create 600 = 5700s)
+#   Default: 11040s (2820 + 2520 + 5700)
+#   Enforced at the complexity-adjustment step (after env vars take effect).
+#   Env vars:
+#     MAX_ORCHESTRATOR_WALL_TIME — initial base (default 11040s; raised to
+#                                  the phase-budget sum if env value is less)
+#   After the phase-budget floor, per-L-task bumps (1800s each) are added
+#   on top, capped at 4× the phase-budget-floored base value.
+#
+# Decision logic / enforcement: implement-issue-orchestrator.sh
+# (search for PR_REVIEW_WALL_BUDGET / check_pr_review_wall_timeout,
+#  TEST_LOOP_WALL_BUDGET / check_test_loop_wall_timeout / calc_test_loop_budget,
+#  and calc_orchestrator_wall_time / MAX_ORCHESTRATOR_WALL_TIME)
+# =============================================================================
+
+# =============================================================================
 # LOOKUP FUNCTIONS
 # =============================================================================
 #

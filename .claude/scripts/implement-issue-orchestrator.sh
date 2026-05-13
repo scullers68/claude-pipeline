@@ -86,8 +86,35 @@ MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"
 MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
 MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
 MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
-MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"
+# Default = sum of per-phase budgets so the global cap never pre-empts
+# a loop that is within its own budget.  See calc_orchestrator_wall_time()
+# for the formula; the numeric default mirrors its calculation:
+#   test-loop  (900s × 3 + 120s slack)               = 2820s
+#   pr-review  (1200s × 2 + 120s slack, 200+ lines)  = 2520s
+#   overhead   (validate 1800 + implement 1800
+#               + task-review 900 + test 600 + pr 600) = 5700s
+#                                              Total : 11040s (~3h)
+# Recalculated at runtime by calc_orchestrator_wall_time() using the
+# actual env-overridden per-phase budget variables.
+# Override via MAX_ORCHESTRATOR_WALL_TIME env to set a different base.
+MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-11040}"
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
+# Slack added on top of the per-iteration timeout when computing the
+# PR-review loop wall-clock budget.  Override via env to tune.
+PR_REVIEW_WALL_TIME_SLACK="${PR_REVIEW_WALL_TIME_SLACK:-120}"
+# Full override for the PR-review loop budget (seconds).  When set,
+# replaces the formula pr_review_timeout*max(max_iter,1)+slack entirely.
+PR_REVIEW_WALL_BUDGET="${PR_REVIEW_WALL_BUDGET:-}"
+# Sane planned-iteration count used when computing the test loop's
+# own wall-clock budget.  Intentionally smaller than MAX_TEST_ITERATIONS
+# (7) so the budget reflects realistic expected usage, not worst-case.
+# Override via env to tune without changing the hard iteration cap.
+TEST_LOOP_PLANNED_ITERATIONS="${TEST_LOOP_PLANNED_ITERATIONS:-3}"
+# Slack added on top of the per-iteration timeout for the test-loop budget.
+TEST_ITER_WALL_TIME_SLACK="${TEST_ITER_WALL_TIME_SLACK:-120}"
+# Full override for the test-loop wall-clock budget (seconds).  When set,
+# replaces test-iter-timeout×planned_iter+slack entirely.
+TEST_LOOP_WALL_BUDGET="${TEST_LOOP_WALL_BUDGET:-}"
 
 # Kill-switch for emergency bash fallback.  The escalation-policy skill is
 # now the default routing backend.  Set ESCALATION_POLICY_BACKEND=bash to
@@ -164,6 +191,99 @@ check_wall_timeout() {
         return 1
     fi
     return 0
+}
+
+# Check the PR-review loop's own wall-clock budget.
+# Returns 0 if within budget, 1 if the budget has been exceeded.
+#
+# Arguments:
+#   $1 - loop_start : epoch (seconds) when the PR-review loop began
+#   $2 - budget     : total allowed seconds for the loop
+check_pr_review_wall_timeout() {
+    local loop_start="$1"
+    local budget="$2"
+    local now elapsed
+    now=$(date +%s)
+    elapsed=$(( now - loop_start ))
+    if (( elapsed > budget )); then
+        log_warn "PR-review wall-clock budget exceeded: ${elapsed}s elapsed (limit: ${budget}s). Soft-exiting review loop."
+        return 1
+    fi
+    return 0
+}
+
+# Check the test loop's own wall-clock budget.
+# Returns 0 if within budget, 1 if the budget has been exceeded.
+#
+# Arguments:
+#   $1 - loop_start : epoch (seconds) when the test loop began
+#   $2 - budget     : total allowed seconds for the loop
+check_test_loop_wall_timeout() {
+    local loop_start="$1"
+    local budget="$2"
+    local now elapsed
+    now=$(date +%s)
+    elapsed=$(( now - loop_start ))
+    if (( elapsed > budget )); then
+        log_warn "Test-loop wall-clock budget exceeded:" \
+            "${elapsed}s elapsed (limit: ${budget}s)." \
+            "Soft-exiting test loop."
+        return 1
+    fi
+    return 0
+}
+
+# Compute the test loop's own wall-clock budget (seconds).
+#
+# Formula: get_stage_timeout("test-iter") × max(planned_iter, 1)
+#            + TEST_ITER_WALL_TIME_SLACK
+#
+# When TEST_LOOP_WALL_BUDGET is set, it overrides the formula entirely.
+# TEST_LOOP_PLANNED_ITERATIONS and TEST_ITER_WALL_TIME_SLACK are both
+# env-overridable at the call site.
+#
+# Output: budget seconds to stdout
+calc_test_loop_budget() {
+    if [[ -n "${TEST_LOOP_WALL_BUDGET:-}" ]]; then
+        printf '%s' "$TEST_LOOP_WALL_BUDGET"
+        return 0
+    fi
+    local test_iter_timeout effective_iter
+    test_iter_timeout=$(get_stage_timeout "test-iter" "")
+    effective_iter=$(( TEST_LOOP_PLANNED_ITERATIONS > 1 \
+        ? TEST_LOOP_PLANNED_ITERATIONS : 1 ))
+    printf '%s' "$(( test_iter_timeout * effective_iter \
+        + TEST_ITER_WALL_TIME_SLACK ))"
+}
+
+# Compute the minimum orchestrator wall-clock budget as the sum of all
+# per-phase budgets.  Used as a floor for MAX_ORCHESTRATOR_WALL_TIME at
+# the complexity-adjustment step so the global cap never fires while a
+# per-loop budget still has time remaining.
+#
+# Components:
+#   test loop   — calc_test_loop_budget() (respects TEST_LOOP_WALL_BUDGET)
+#   pr review   — PR_REVIEW_WALL_BUDGET when set; otherwise worst-case:
+#                 1200s × max(MAX_PR_REVIEW_ITERATIONS,1) +
+#                 PR_REVIEW_WALL_TIME_SLACK  (200+ line diff, full iters)
+#   overhead    — stages outside the per-loop budgets (constants from
+#                 get_stage_timeout):
+#                   validate_plan(1800) + implement-one-task(1800)
+#                   + task-review(900) + test-single(600) + pr-create(600)
+#                 = 5700s
+#
+# Output: minimum budget seconds to stdout
+calc_orchestrator_wall_time() {
+	local test_budget pr_budget pr_iter
+	test_budget=$(calc_test_loop_budget)
+	if [[ -n "${PR_REVIEW_WALL_BUDGET:-}" ]]; then
+		pr_budget="$PR_REVIEW_WALL_BUDGET"
+	else
+		pr_iter=$(( MAX_PR_REVIEW_ITERATIONS > 1 \
+			? MAX_PR_REVIEW_ITERATIONS : 1 ))
+		pr_budget=$(( 1200 * pr_iter + PR_REVIEW_WALL_TIME_SLACK ))
+	fi
+	printf '%s' "$(( test_budget + pr_budget + 5700 ))"
 }
 
 # =============================================================================
@@ -4848,6 +4968,26 @@ run_test_loop() {
         log "WARNING: Playwright specs found but TEST_E2E_CMD not configured — Playwright specs will be skipped"
     fi
 
+    # Compute the test loop's own wall-clock budget.
+    # Formula: test-iter-timeout × max(planned_iter, 1) + slack
+    # Each factor is env-overridable; TEST_LOOP_WALL_BUDGET overrides all.
+    local test_loop_wall_budget
+    test_loop_wall_budget=$(calc_test_loop_budget)
+    if [[ -n "${TEST_LOOP_WALL_BUDGET:-}" ]]; then
+        log "Test loop wall-clock budget: ${test_loop_wall_budget}s" \
+            "(env override)"
+    else
+        local _tl_iter_timeout _tl_planned_eff
+        _tl_iter_timeout=$(get_stage_timeout "test-iter" "")
+        _tl_planned_eff=$(( TEST_LOOP_PLANNED_ITERATIONS > 1 \
+            ? TEST_LOOP_PLANNED_ITERATIONS : 1 ))
+        log "Test loop wall-clock budget: ${test_loop_wall_budget}s" \
+            "(${_tl_iter_timeout}s/iter × ${_tl_planned_eff}" \
+            "+ ${TEST_ITER_WALL_TIME_SLACK}s slack)"
+    fi
+    local test_loop_start
+    test_loop_start=$(date +%s)
+
     local prior_failure_sigs=""
     while [[ "$loop_complete" != "true" ]]; do
         test_iteration=$((test_iteration + 1))
@@ -4857,6 +4997,15 @@ run_test_loop() {
             log_warn "Wall-clock timeout in test loop at iteration $test_iteration"
             set_final_state "wall_timeout_test"
             DEGRADED_STAGES+=("test:wall_timeout:iter=$test_iteration")
+            loop_complete=true
+            break
+        fi
+
+        if ! check_test_loop_wall_timeout \
+                "$test_loop_start" "$test_loop_wall_budget"; then
+            log_warn "Test-loop budget timeout at iteration $test_iteration"
+            set_final_state "wall_timeout_test"
+            DEGRADED_STAGES+=("test:wall_timeout_budget:iter=$test_iteration")
             loop_complete=true
             break
         fi
@@ -5931,8 +6080,15 @@ $excerpt
     # 'minimal' skips optional quality/simplify stages and 'full' enforces them.
 
     # -------------------------------------------------------------------------
-    # COMPLEXITY-ADJUSTED WALL-CLOCK BUDGET
-    # Add 1800s per L-sized task, capped at 4x the base value.
+    # WALL-CLOCK BUDGET: phase-budget floor then complexity bump
+    #
+    # Step 1 — Phase-budget floor: raise MAX_ORCHESTRATOR_WALL_TIME to at
+    #   least the sum of all per-phase budgets (calc_orchestrator_wall_time).
+    #   Computed here — after all env vars have taken effect — so env
+    #   overrides to per-phase budgets are reflected in the floor.
+    #
+    # Step 2 — Complexity bump: add 1800s per L-sized task on top of the
+    #   already-floored base, capped at 4x to limit runaway wall times.
     # -------------------------------------------------------------------------
     local l_task_count base_wall_time max_wall_time wall_time_bump
     l_task_count=$(printf '%s' "$tasks_json" | jq -r '.[].description' \
@@ -5941,6 +6097,17 @@ $excerpt
             [[ -n "$s" ]] && printf '%s\n' "$s"
           done \
         | grep -c '^L$' || true)
+
+    # Step 1: phase-budget floor
+    local phase_budget_sum
+    phase_budget_sum=$(calc_orchestrator_wall_time)
+    if (( MAX_ORCHESTRATOR_WALL_TIME < phase_budget_sum )); then
+        log "Wall-clock budget raised to phase-budget sum:" \
+            "${MAX_ORCHESTRATOR_WALL_TIME}s → ${phase_budget_sum}s"
+        MAX_ORCHESTRATOR_WALL_TIME=$phase_budget_sum
+    fi
+
+    # Step 2: complexity bump
     base_wall_time="$MAX_ORCHESTRATOR_WALL_TIME"
     max_wall_time=$(( base_wall_time * 4 ))
     wall_time_bump=$(( l_task_count * 1800 ))
@@ -6819,6 +6986,29 @@ $pr_creation_skill}"
 
         local review_history_file="$LOG_BASE/context/pr-review-history.json"
 
+        # Compute the PR-review loop's own wall-clock budget.
+        # Formula: pr_review_timeout * max(max_iter, 1) + slack
+        # Each factor is diff-size-scaled (timeout) and profile-adjusted
+        # (max_iter), so the budget reflects actual expected work.
+        # Override the entire budget with PR_REVIEW_WALL_BUDGET (env).
+        local pr_review_effective_iter
+        pr_review_effective_iter=$(( pr_review_max_iter > 1 \
+            ? pr_review_max_iter : 1 ))
+        local pr_review_wall_budget
+        if [[ -n "$PR_REVIEW_WALL_BUDGET" ]]; then
+            pr_review_wall_budget="$PR_REVIEW_WALL_BUDGET"
+            log "PR review wall-clock budget: ${pr_review_wall_budget}s (env override)"
+        else
+            pr_review_wall_budget=$(( pr_review_timeout \
+                * pr_review_effective_iter \
+                + PR_REVIEW_WALL_TIME_SLACK ))
+            log "PR review wall-clock budget: ${pr_review_wall_budget}s" \
+                "(${pr_review_timeout}s/iter × ${pr_review_effective_iter}" \
+                "+ ${PR_REVIEW_WALL_TIME_SLACK}s slack)"
+        fi
+        local pr_review_loop_start
+        pr_review_loop_start=$(date +%s)
+
     while [[ "$pr_approved" != "true" ]]; do
         increment_pr_review_iteration
         local pr_iteration
@@ -6826,6 +7016,15 @@ $pr_creation_skill}"
 
         if ! check_wall_timeout; then
             log_warn "Wall-clock timeout in PR review loop at iteration $pr_iteration"
+            set_final_state "wall_timeout_pr_review"
+            DEGRADED_STAGES+=("pr_review:wall_timeout")
+            pr_approved=true
+            break
+        fi
+
+        if ! check_pr_review_wall_timeout \
+                "$pr_review_loop_start" "$pr_review_wall_budget"; then
+            log_warn "PR-review budget timeout at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
             pr_approved=true
