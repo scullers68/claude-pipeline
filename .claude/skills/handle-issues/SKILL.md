@@ -592,6 +592,8 @@ echo "## Handle Issues Complete"
 echo ""
 echo "**State:** $STATE"
 echo "**Progress:** $COMPLETED/$TOTAL completed, $FAILED failed"
+# Issues whose orchestrator exited with state="merge_blocked" (BLOCK_MERGE_ON_CONVERGENCE_FAILURE gate)
+# are surfaced as a distinct `merge_blocked` column in `.progress` — count them separately from `failed`.
 echo ""
 echo "### Results"
 echo ""

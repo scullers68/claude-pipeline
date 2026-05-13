@@ -113,6 +113,8 @@ Logs written to `logs/implement-issue/issue-N-timestamp/`:
 | 2 | Max iterations exceeded |
 | 3 | Configuration/argument error |
 
+If the orchestrator is killed mid-stage, the EXIT trap rewrites `state="running"` in `status.json` to `interrupted_during_<stage>` (e.g., `interrupted_during_merge_pr`) so the exit point is observable rather than masked by the recovery path in `batch-orchestrator.sh`.
+
 ## Integration
 
 Called by `handle-issues` via `batch-orchestrator.sh`.
