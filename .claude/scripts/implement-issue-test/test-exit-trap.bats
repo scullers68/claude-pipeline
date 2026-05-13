@@ -87,9 +87,11 @@ teardown() {
 
 @test "_rewrite_running_to_interrupted uses unknown stage when current_stage is null" {
     init_status
-    # Set state to running directly without calling set_stage_started so
-    # current_stage remains null (the edge case for a very early exit).
-    jq '.state = "running"' "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+    # Set state to running and explicitly null current_stage to simulate the
+    # edge case of a very early exit before any stage has been started.
+    # (init_status sets current_stage="parse_issue"; we must clear it here.)
+    jq '.state = "running" | .current_stage = null' "$STATUS_FILE" \
+        > "${STATUS_FILE}.tmp" \
         && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 
     _rewrite_running_to_interrupted
@@ -122,7 +124,10 @@ teardown() {
     # Build a wrapper that sources the orchestrator's extracted functions and
     # registers the post-task-2 EXIT trap, then sleeps (simulating a blocked
     # stage).  Killing it with SIGTERM triggers the EXIT trap.
+    # A ready-file handshake eliminates the race between sourcing the large
+    # functions file and the test sending SIGTERM.
     local wrapper="$TEST_TMP/sigterm_wrapper.sh"
+    local ready_file="$TEST_TMP/wrapper_ready"
     cat > "$wrapper" << WRAPPER
 #!/usr/bin/env bash
 source "$TEST_TMP/orchestrator_functions.bash"
@@ -131,14 +136,23 @@ export LOG_BASE="$LOG_BASE"
 export LOG_FILE="$LOG_FILE"
 # EXIT trap as it will look after issue-325 task 2 is applied:
 trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metrics' EXIT
+# SIGTERM trap mirrors the orchestrator: convert signal into a clean exit so
+# the EXIT trap fires reliably (bash may not run EXIT when blocked on a
+# foreground child process receiving an unhandled SIGTERM).
+trap 'exit 143' TERM
+# Signal readiness after all traps are registered, then block.
+touch "$ready_file"
 sleep 30
 WRAPPER
     chmod +x "$wrapper"
 
     "$wrapper" &
     local pid=$!
-    # Give the wrapper a moment to register its trap before killing it.
-    sleep 0.2
+    # Wait until the wrapper has sourced functions and registered its traps.
+    local i=0
+    while [[ ! -f "$ready_file" ]] && ((i++ < 50)); do
+        sleep 0.1
+    done
     kill -TERM "$pid"
     wait "$pid" 2>/dev/null || true
 
@@ -160,6 +174,7 @@ export STATUS_FILE="$STATUS_FILE"
 export LOG_BASE="$LOG_BASE"
 export LOG_FILE="$LOG_FILE"
 trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metrics' EXIT
+trap 'exit 143' TERM
 # Normal exit — state is already "completed"
 exit 0
 WRAPPER

@@ -806,6 +806,34 @@ compute_task_summary() {
     ' "$STATUS_FILE"
 }
 
+# _rewrite_running_to_interrupted() — called from the EXIT trap to surface
+# interrupted runs as a distinct state rather than leaving state="running".
+# When state is "running" at exit time, rewrites it to
+# "interrupted_during_<current_stage>" (falling back to "unknown" when
+# current_stage is null).  All other terminal states (completed, error,
+# wall_timeout_*, etc.) are left untouched so normal exits are unaffected.
+_rewrite_running_to_interrupted() {
+	if [[ ! -f "$STATUS_FILE" ]]; then
+		return 0
+	fi
+
+	local state stage
+	state=$(jq -r '.state // "running"' "$STATUS_FILE" 2>/dev/null) \
+		|| state="running"
+
+	[[ "$state" == "running" ]] || return 0
+
+	stage=$(jq -r '.current_stage // "unknown"' "$STATUS_FILE" 2>/dev/null) \
+		|| stage="unknown"
+	[[ -n "$stage" && "$stage" != "null" ]] || stage="unknown"
+
+	jq --arg new_state "interrupted_during_${stage}" \
+	   '.state = $new_state | .last_update = (now | todate)' \
+	   "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+	sync_status_to_log
+}
+
 # write_task_summary_to_status() — compute task summary and persist it as
 # .task_summary in status.json.  Called on every exit path via the EXIT trap.
 write_task_summary_to_status() {
@@ -1098,10 +1126,21 @@ STAGE_COUNTER=0
 _CONSECUTIVE_TIMEOUTS=0
 _TIMED_OUT_STAGE_NAMES=""
 
-# Register EXIT trap so export_metrics() runs on every exit path
-# (export_metrics is defined later in the STATUS FILE MANAGEMENT section
-# but bash traps are evaluated at exit time, so forward reference is fine)
-trap 'write_task_summary_to_status; export_metrics' EXIT
+# Register EXIT trap so interrupted runs surface as a distinct state and
+# metrics are always exported.  All three helpers are forward-referenced —
+# bash traps evaluate at exit time, so the definitions need not precede this
+# line.  Call order:
+#   1. _rewrite_running_to_interrupted — rewrite state="running" to
+#      "interrupted_during_<stage>" before anything else reads it
+#   2. write_task_summary_to_status   — persist task summary
+#   3. export_metrics                 — emit metrics.json
+trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metrics' EXIT
+
+# Catch SIGTERM so the EXIT trap above fires properly.  Without this, bash may
+# not run the EXIT pseudo-signal handler when it is blocked waiting on a child
+# process (e.g. a running claude stage) and receives SIGTERM.  Exit code 143
+# encodes SIGTERM (128 + 15) per POSIX convention.
+trap 'exit 143' TERM
 
 # =============================================================================
 # STATUS SYNC TO LOG DIRECTORY
