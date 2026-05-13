@@ -2,6 +2,9 @@
 logs/
 status.json
 
+# Pipeline-tooling working directories (MCP servers and tools; must not land in feature commits)
+.serena/
+
 # Local customizations (created by /adapting-claude-pipeline, never committed to pipeline repo)
 # These override the generic defaults when synced via apply-local.sh
 .claude/local/
