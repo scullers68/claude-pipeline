@@ -7376,6 +7376,7 @@ $complete_summary
         set_final_state "completed"
     else
         set_stage_started "merge_pr"
+        log "merge_pr: stage started"
 
         # ---------------------------------------------------------------------
         # MERGE GATE — refuse to auto-merge when the quality loop bailed via a
@@ -7401,6 +7402,7 @@ $complete_summary
                 done
             fi
         fi
+        log "merge_pr: merge_blocked_reason check done — blocked='${merge_blocked_reason:-<none>}'"
 
         if [[ -n "$merge_blocked_reason" ]]; then
             log_warn "Merge blocked for PR #$pr_number: unresolved quality feedback"
@@ -7430,15 +7432,23 @@ $merge_blocked_reason}" \
         fi
 
         log "Merging PR #$pr_number into $BASE_BRANCH..."
+        log "merge_pr: posting merge-in-progress comment on issue"
         comment_issue "Merge: Merging" \
             "🔀 Merging PR #$pr_number into \`$BASE_BRANCH\`..." \
             "default"
+        log "merge_pr: merge-in-progress comment posted"
+        log "merge_pr: invoking merge-mr.sh for PR #$pr_number"
 
         if "$PLATFORM_DIR/merge-mr.sh" "$pr_number" >>"${LOG_FILE:-/dev/null}" 2>&1; then
+            log "merge_pr: merge-mr.sh succeeded for PR #$pr_number"
             log "PR #$pr_number merged successfully. Switching to $BASE_BRANCH..."
-            git fetch origin >>"${LOG_FILE:-/dev/null}" 2>&1 \
-                && git checkout "$BASE_BRANCH" >>"${LOG_FILE:-/dev/null}" 2>&1 \
-                && git pull >>"${LOG_FILE:-/dev/null}" 2>&1
+            log "merge_pr: git fetch origin"
+            git fetch origin >>"${LOG_FILE:-/dev/null}" 2>&1
+            log "merge_pr: git checkout $BASE_BRANCH"
+            git checkout "$BASE_BRANCH" >>"${LOG_FILE:-/dev/null}" 2>&1
+            log "merge_pr: git pull"
+            git pull >>"${LOG_FILE:-/dev/null}" 2>&1
+            log "merge_pr: git fetch/checkout/pull complete"
             log "Now on $BASE_BRANCH (up to date)"
             comment_issue "Merge: Complete" \
                 "✅ PR #$pr_number merged into \`$BASE_BRANCH\` successfully." \
@@ -7446,6 +7456,7 @@ $merge_blocked_reason}" \
             set_stage_completed "merge_pr"
             set_final_state "completed"
         else
+            log "merge_pr: merge-mr.sh failed for PR #$pr_number"
             log_error "Failed to merge PR #$pr_number"
             comment_issue "Merge: Failed" \
                 "❌ Failed to merge PR #$pr_number. Manual intervention required." \
