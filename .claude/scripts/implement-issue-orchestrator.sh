@@ -2162,11 +2162,27 @@ Output a summary of changes made."
             local simplify_stage_name="simplify-${stage_prefix}-iter-$loop_iteration"
             set_stage_started "$simplify_stage_name"
             local simplify_result
+            local simplify_head_before
+            simplify_head_before=$(git -C "$loop_dir" rev-parse HEAD \
+                2>/dev/null || true)
             simplify_result=$(run_stage "$simplify_stage_name" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
             local simplify_status
             simplify_status=$(printf '%s' "$simplify_result" | jq -r '.status // "success"')
             if [[ "$simplify_status" != "error" ]]; then
                 set_stage_completed "$simplify_stage_name"
+            fi
+
+            # Guard: verify any new simplify commit against path allowlist
+            local simplify_head_after
+            simplify_head_after=$(git -C "$loop_dir" rev-parse HEAD \
+                2>/dev/null || true)
+            if [[ "$simplify_head_after" != "$simplify_head_before" ]]; then
+                guard_commit_path_allowlist "$loop_dir" || {
+                    log_error \
+                        "$simplify_stage_name: committed paths outside" \
+                        "the code/tests allowlist — aborting quality loop"
+                    break
+                }
             fi
 
             simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.output.summary // "No changes"')
@@ -2463,6 +2479,16 @@ Fix the issues and commit. Output a summary of fixes applied."
             local current_fix_model post_fix_commits
             current_fix_model=$(printf '%s' "$fix_result" | jq -r '.model // "sonnet"')
             post_fix_commits=$(git rev-list --count "${BASE_BRANCH}..${loop_branch}" 2>/dev/null || echo "0")
+
+            # Guard: verify any new fix-review commit against path allowlist
+            if (( post_fix_commits > pre_fix_commits )); then
+                guard_commit_path_allowlist "$loop_dir" || {
+                    log_error \
+                        "$fix_stage_name: committed paths outside" \
+                        "the code/tests allowlist — aborting quality loop"
+                    break
+                }
+            fi
 
             if (( post_fix_commits <= pre_fix_commits )) && (( loop_iteration >= 2 )); then
                 log_warn "Quality loop stall detected on iteration $loop_iteration: fix produced no new commits (pre=$pre_fix_commits post=$post_fix_commits)"
@@ -3559,6 +3585,18 @@ Commit your changes with a descriptive message."
 		# Sanitize: remove accidentally committed binary/data files
 		sanitize_worktree_commits "." "$base_branch" "$task_id"
 
+		# Guard: verify the latest commit is within the code/tests allowlist
+		if ! guard_commit_path_allowlist "."; then
+			log_error \
+				"Task $task_id: implement stage committed paths" \
+				"outside the code/tests allowlist"
+			printf '%s' \
+				"{\"status\":\"failed\"," \
+				"\"review_attempts\":$review_attempts}" \
+				> "$result_file"
+			return 1
+		fi
+
 		# Run quality loop inside worktree
 		if should_run_quality_loop "$task_size"; then
 			local quality_max
@@ -3664,6 +3702,56 @@ sanitize_worktree_commits() {
 		git -C "$wt_path" rm --cached "$file" 2>/dev/null || true
 	done
 	git -C "$wt_path" commit --amend --no-edit 2>/dev/null || true
+}
+
+# Post-commit path-allowlist guard (issue #315).
+#
+# After a commit-producing stage (implement, simplify, fix-review) makes a
+# commit, call this function to verify the new commit only touches files
+# inside the allowed set:
+#
+#   - paths under tests/
+#   - recognised source-code extensions:
+#       .ts .tsx .js .jsx .mjs .cjs .sh .bats
+#       .py .go .rb .java .rs .c .cpp .h .hpp
+#
+# Any path outside the allowlist causes the function to return non-zero
+# and emit a clear error, which the caller must treat as a stage failure.
+#
+# Arguments:
+#   $1 - git directory (passed to git -C); defaults to "."
+#   $2 - git ref to inspect; defaults to HEAD
+#
+guard_commit_path_allowlist() {
+	local git_dir="${1:-.}"
+	local ref="${2:-HEAD}"
+	local path
+	local -a bad=()
+
+	while IFS= read -r path; do
+		[[ -n "$path" ]] || continue
+		case "$path" in
+			tests/*) continue ;;
+			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs)
+				continue ;;
+			*.sh | *.bats | *.py | *.go | *.rb | *.java | *.rs)
+				continue ;;
+			*.c | *.cpp | *.h | *.hpp) continue ;;
+			*) bad+=("$path") ;;
+		esac
+	done < <(
+		git -C "$git_dir" show --name-only --pretty=format: \
+			"$ref" 2>/dev/null \
+			| sed '/^$/d'
+	)
+
+	if (( ${#bad[@]} > 0 )); then
+		log_error \
+			"commit $ref touches paths outside the" \
+			"code/tests allowlist: ${bad[*]}"
+		return 1
+	fi
+	return 0
 }
 
 # Merge a worktree branch into the feature branch.
