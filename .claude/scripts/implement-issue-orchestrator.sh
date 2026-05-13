@@ -806,6 +806,34 @@ compute_task_summary() {
     ' "$STATUS_FILE"
 }
 
+# _rewrite_running_to_interrupted() — called from the EXIT trap to surface
+# interrupted runs as a distinct state rather than leaving state="running".
+# When state is "running" at exit time, rewrites it to
+# "interrupted_during_<current_stage>" (falling back to "unknown" when
+# current_stage is null).  All other terminal states (completed, error,
+# wall_timeout_*, etc.) are left untouched so normal exits are unaffected.
+_rewrite_running_to_interrupted() {
+	if [[ ! -f "$STATUS_FILE" ]]; then
+		return 0
+	fi
+
+	local state stage
+	state=$(jq -r '.state // "running"' "$STATUS_FILE" 2>/dev/null) \
+		|| state="running"
+
+	[[ "$state" == "running" ]] || return 0
+
+	stage=$(jq -r '.current_stage // "unknown"' "$STATUS_FILE" 2>/dev/null) \
+		|| stage="unknown"
+	[[ -n "$stage" && "$stage" != "null" ]] || stage="unknown"
+
+	jq --arg new_state "interrupted_during_${stage}" \
+	   '.state = $new_state | .last_update = (now | todate)' \
+	   "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+	sync_status_to_log
+}
+
 # write_task_summary_to_status() — compute task summary and persist it as
 # .task_summary in status.json.  Called on every exit path via the EXIT trap.
 write_task_summary_to_status() {
@@ -1098,10 +1126,21 @@ STAGE_COUNTER=0
 _CONSECUTIVE_TIMEOUTS=0
 _TIMED_OUT_STAGE_NAMES=""
 
-# Register EXIT trap so export_metrics() runs on every exit path
-# (export_metrics is defined later in the STATUS FILE MANAGEMENT section
-# but bash traps are evaluated at exit time, so forward reference is fine)
-trap 'write_task_summary_to_status; export_metrics' EXIT
+# Register EXIT trap so interrupted runs surface as a distinct state and
+# metrics are always exported.  All three helpers are forward-referenced —
+# bash traps evaluate at exit time, so the definitions need not precede this
+# line.  Call order:
+#   1. _rewrite_running_to_interrupted — rewrite state="running" to
+#      "interrupted_during_<stage>" before anything else reads it
+#   2. write_task_summary_to_status   — persist task summary
+#   3. export_metrics                 — emit metrics.json
+trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metrics' EXIT
+
+# Catch SIGTERM so the EXIT trap above fires properly.  Without this, bash may
+# not run the EXIT pseudo-signal handler when it is blocked waiting on a child
+# process (e.g. a running claude stage) and receives SIGTERM.  Exit code 143
+# encodes SIGTERM (128 + 15) per POSIX convention.
+trap 'exit 143' TERM
 
 # =============================================================================
 # STATUS SYNC TO LOG DIRECTORY
@@ -7376,6 +7415,7 @@ $complete_summary
         set_final_state "completed"
     else
         set_stage_started "merge_pr"
+        log "merge_pr: stage started"
 
         # ---------------------------------------------------------------------
         # MERGE GATE — refuse to auto-merge when the quality loop bailed via a
@@ -7401,6 +7441,7 @@ $complete_summary
                 done
             fi
         fi
+        log "merge_pr: merge_blocked_reason check done — blocked='${merge_blocked_reason:-<none>}'"
 
         if [[ -n "$merge_blocked_reason" ]]; then
             log_warn "Merge blocked for PR #$pr_number: unresolved quality feedback"
@@ -7430,15 +7471,23 @@ $merge_blocked_reason}" \
         fi
 
         log "Merging PR #$pr_number into $BASE_BRANCH..."
+        log "merge_pr: posting merge-in-progress comment on issue"
         comment_issue "Merge: Merging" \
             "🔀 Merging PR #$pr_number into \`$BASE_BRANCH\`..." \
             "default"
+        log "merge_pr: merge-in-progress comment posted"
+        log "merge_pr: invoking merge-mr.sh for PR #$pr_number"
 
         if "$PLATFORM_DIR/merge-mr.sh" "$pr_number" >>"${LOG_FILE:-/dev/null}" 2>&1; then
+            log "merge_pr: merge-mr.sh succeeded for PR #$pr_number"
             log "PR #$pr_number merged successfully. Switching to $BASE_BRANCH..."
-            git fetch origin >>"${LOG_FILE:-/dev/null}" 2>&1 \
-                && git checkout "$BASE_BRANCH" >>"${LOG_FILE:-/dev/null}" 2>&1 \
-                && git pull >>"${LOG_FILE:-/dev/null}" 2>&1
+            log "merge_pr: git fetch origin"
+            git fetch origin >>"${LOG_FILE:-/dev/null}" 2>&1
+            log "merge_pr: git checkout $BASE_BRANCH"
+            git checkout "$BASE_BRANCH" >>"${LOG_FILE:-/dev/null}" 2>&1
+            log "merge_pr: git pull"
+            git pull >>"${LOG_FILE:-/dev/null}" 2>&1
+            log "merge_pr: git fetch/checkout/pull complete"
             log "Now on $BASE_BRANCH (up to date)"
             comment_issue "Merge: Complete" \
                 "✅ PR #$pr_number merged into \`$BASE_BRANCH\` successfully." \
@@ -7446,6 +7495,7 @@ $merge_blocked_reason}" \
             set_stage_completed "merge_pr"
             set_final_state "completed"
         else
+            log "merge_pr: merge-mr.sh failed for PR #$pr_number"
             log_error "Failed to merge PR #$pr_number"
             comment_issue "Merge: Failed" \
                 "❌ Failed to merge PR #$pr_number. Manual intervention required." \

@@ -686,6 +686,12 @@ process_issue() {
                 impl_status="error"
                 impl_error="Script exited with state: $state"
                 ;;
+            interrupted_during_*)
+                local interrupted_stage="${state#interrupted_during_}"
+                impl_status="error"
+                impl_error="Orchestrator interrupted during: $interrupted_stage"
+                log_warn "orchestrator interrupted during $interrupted_stage"
+                ;;
             *)
                 impl_status="error"
                 impl_error="Unknown state: $state"
