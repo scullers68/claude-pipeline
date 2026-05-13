@@ -6585,7 +6585,24 @@ Add comprehensive JSDoc/TSDoc comments to this file only. Stage the changes with
                 run_stage "docs-file-$file_idx" "$docs_file_prompt" "implement-issue-implement.json" "default"
             done <<< "$modified_ts_files"
 
-            run_stage "docs-commit" "Commit all staged docblock changes with message: docs(issue-$ISSUE_NUMBER): add JSDoc comments" "implement-issue-implement.json" "default"
+            # Build explicit git add commands for only the files documented above.
+            # This prevents the agent from using 'git add -A' or 'git add .'.
+            local docs_commit_add_cmds
+            docs_commit_add_cmds=$(while IFS= read -r f; do
+                [[ -z "$f" ]] && continue
+                printf 'git add "%s"\n' "$f"
+            done <<< "$modified_ts_files")
+
+            local docs_commit_prompt="Commit the docblock changes added by the docs-file-N stages for issue #$ISSUE_NUMBER.
+
+Stage and commit ONLY these specific files — do NOT use 'git add -A' or 'git add .':
+
+$docs_commit_add_cmds
+Then commit with:
+git commit -m 'docs(issue-$ISSUE_NUMBER): add JSDoc comments'
+
+Only the files listed above should be staged and committed."
+            run_stage "docs-commit" "$docs_commit_prompt" "implement-issue-implement.json" "default"
 
             set_stage_completed "docs"
         fi
