@@ -1144,6 +1144,297 @@ EOF
         fail "Max turns logging not found in log. Log: $(cat "$LOG_FILE")"
 }
 
+# -----------------------------------------------------------------------------
+# pr / pr-review budgets are intentionally unchanged by the stage-type-aware
+# override — verify they still get their original caps (5 / 10) and that the
+# new MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW env vars do not affect them.
+# -----------------------------------------------------------------------------
+
+@test "run_stage passes --max-turns 5 to pr stage (unchanged)" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # pr is the exact match — PR creation budget is 5 turns
+    run_stage "pr" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 5" "$claude_calls" || \
+        fail "Expected --max-turns 5 for pr stage. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage logs pr stage max-turns at original value (5)" {
+    source "$TEST_TMP/model-config.sh"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "pr" "prompt" "test-schema.json" "" ""
+
+    grep -q "Max turns: 5 (PR creation" "$LOG_FILE" || \
+        fail "Expected PR creation max-turns log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage passes --max-turns 10 to pr-review stage (unchanged)" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # pr-review matches the "pr-review" prefix — focused diff analysis = 10 turns
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 10" "$claude_calls" || \
+        fail "Expected --max-turns 10 for pr-review stage. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage logs pr-review stage max-turns at original value (10)" {
+    source "$TEST_TMP/model-config.sh"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    grep -q "Max turns: 10 (PR review" "$LOG_FILE" || \
+        fail "Expected PR review max-turns log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage pr budget ignores MAX_TURNS_SIMPLIFY env var" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_SIMPLIFY=99
+
+    run_stage "pr" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_SIMPLIFY
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 5" "$claude_calls" || \
+        fail "Expected --max-turns 5 (pr unchanged by MAX_TURNS_SIMPLIFY). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 99" "$claude_calls" && \
+        fail "pr should not honour MAX_TURNS_SIMPLIFY" || true
+}
+
+@test "run_stage pr-review budget ignores MAX_TURNS_FIX_REVIEW env var" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_FIX_REVIEW=99
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_FIX_REVIEW
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 10" "$claude_calls" || \
+        fail "Expected --max-turns 10 (pr-review unchanged by MAX_TURNS_FIX_REVIEW). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 99" "$claude_calls" && \
+        fail "pr-review should not honour MAX_TURNS_FIX_REVIEW" || true
+}
+
+# =============================================================================
+# STAGE-TYPE-AWARE MAX-TURNS OVERRIDES (simplify + fix/fix-review-*)
+# =============================================================================
+
+@test "run_stage passes --max-turns 12 to haiku for simplify stage (default)" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # simplify is a light-tier stage — resolves to haiku
+    run_stage "simplify-task-1-iter-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 12" "$claude_calls" || \
+        fail "Expected --max-turns 12 for simplify haiku. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage respects MAX_TURNS_SIMPLIFY env var for simplify stage" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_SIMPLIFY=8
+
+    run_stage "simplify-task-1-iter-1" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_SIMPLIFY
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 8" "$claude_calls" || \
+        fail "Expected --max-turns 8 (MAX_TURNS_SIMPLIFY=8). Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage logs simplify haiku cap with env var name" {
+    source "$TEST_TMP/model-config.sh"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "simplify-task-1-iter-1" "prompt" "test-schema.json" "" ""
+
+    grep -q "MAX_TURNS_SIMPLIFY" "$LOG_FILE" || \
+        fail "Expected MAX_TURNS_SIMPLIFY in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage passes --max-turns 20 to sonnet for fix stage (default)" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # fix is standard tier — resolves to sonnet; model_override ensures sonnet
+    run_stage "fix-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 for fix sonnet. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage passes --max-turns 20 to sonnet for fix-review stage (default)" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # fix-review-* matches the "fix" prefix; model_override ensures sonnet
+    run_stage "fix-review-task-1-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 for fix-review sonnet. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage respects MAX_TURNS_FIX_REVIEW env var for fix stage" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_FIX_REVIEW=15
+
+    run_stage "fix-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    unset MAX_TURNS_FIX_REVIEW
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 15" "$claude_calls" || \
+        fail "Expected --max-turns 15 (MAX_TURNS_FIX_REVIEW=15). Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage logs fix sonnet cap with env var name" {
+    source "$TEST_TMP/model-config.sh"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "fix-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    grep -q "MAX_TURNS_FIX_REVIEW" "$LOG_FILE" || \
+        fail "Expected MAX_TURNS_FIX_REVIEW in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage respects MAX_TURNS_FIX_REVIEW env var for fix-review stage" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_FIX_REVIEW=15
+
+    run_stage "fix-review-task-1-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    unset MAX_TURNS_FIX_REVIEW
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 15" "$claude_calls" || \
+        fail "Expected --max-turns 15 (MAX_TURNS_FIX_REVIEW=15 for fix-review). Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage does not apply simplify cap when model is not haiku" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # simplify with model_override=sonnet must NOT get the 12-turn simplify cap
+    run_stage "simplify-task-1-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 12" "$claude_calls" && \
+        fail "Should not apply --max-turns 12 simplify cap when model is sonnet" || true
+}
+
+@test "run_stage does not apply fix cap when model is not sonnet" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # fix with model_override=opus must NOT get the 20-turn fix cap
+    run_stage "fix-iter-1" "prompt" "test-schema.json" "" "" "" "opus"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 20" "$claude_calls" && \
+        fail "Should not apply --max-turns 20 fix cap when model is opus" || true
+}
+
 # =============================================================================
 # _APPLY_STAGE_ACTION — STAGE_RESULT ENVELOPE SHAPE
 #
