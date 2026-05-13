@@ -241,6 +241,27 @@ _orchestrator_guard_function_name() {
 	}
 }
 
+@test "(7) simplify-* and fix-review-* prompts carry the selective-staging instruction" {
+	[[ -f "$ORCHESTRATOR" ]] || fail "orchestrator script not present"
+
+	# The instruction must appear at least once inside the simplify_prompt
+	# variable assignment so the simplify-* stage never uses git add -A / git add .
+	grep -A 20 'local simplify_prompt=' "$ORCHESTRATOR" \
+		| grep -qF "git diff --name-only" || {
+		printf 'FAIL: simplify_prompt missing selective-staging instruction\n' >&2
+		return 1
+	}
+
+	# The instruction must appear at least once inside the quality-loop
+	# fix_prompt variable assignment (fix-review-* stage).
+	grep -A 30 "Address code review feedback in working directory" \
+		"$ORCHESTRATOR" \
+		| grep -qF "git diff --name-only" || {
+		printf 'FAIL: fix-review fix_prompt missing selective-staging instruction\n' >&2
+		return 1
+	}
+}
+
 @test "(6) orchestrator implements a post-commit path-allowlist guard" {
 	[[ -f "$ORCHESTRATOR" ]] || fail "orchestrator script not present"
 

@@ -2153,6 +2153,10 @@ $simplify_changed_files
 If no TypeScript/React files were modified as part of this issue's implementation, make no changes and report 'No changes to simplify'.
 
 Simplify code for clarity and consistency without changing functionality.
+When committing: run 'git diff --name-only' to list the files
+you changed, then 'git add' only those specific files. Never
+use 'git add -A' or 'git add .' — only stage files the task
+actually modified.
 Output a summary of changes made."
 
             local simplify_stage_name="simplify-${stage_prefix}-iter-$loop_iteration"
@@ -2426,6 +2430,10 @@ $(if [[ -n "$cumulative_findings" ]]; then
     printf -- '- %s\n' "$cumulative_findings"
 fi)
 
+When committing: run 'git diff --name-only' to list the files
+you changed, then 'git add' only those specific files. Never
+use 'git add -A' or 'git add .' — only stage files the task
+actually modified.
 Fix the issues and commit. Output a summary of fixes applied."
 
             verify_on_feature_branch "$loop_branch" || true
