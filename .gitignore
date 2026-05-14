@@ -8,3 +8,13 @@ status.json
 # Local customizations (created by /adapting-claude-pipeline, never committed to pipeline repo)
 # These override the generic defaults when synced via apply-local.sh
 .claude/local/
+
+# macOS Finder metadata
+.DS_Store
+
+# IDE-local settings (kept on disk, not tracked)
+.vscode/
+
+# Process locks and stale watch-command captures
+.claude/scheduled_tasks.lock
+watch_*
