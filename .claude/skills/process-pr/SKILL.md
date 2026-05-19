@@ -40,6 +40,8 @@ failure_modes:
     mitigation: Stop and return failure; do NOT close the issue
   - id: rerun_failed
     mitigation: Log error and include in output; do not retry automatically
+  - id: mergeStateStatus_false_positive
+    mitigation: Do not check mergeStateStatus directly; call merge-mr.sh which polls .mergeable until MERGEABLE or timeout
 ---
 
 # Process PR/MR
@@ -248,6 +250,8 @@ fi
 PLATFORM_DIR=".claude/scripts/platform"
 "$PLATFORM_DIR/merge-mr.sh" "$PR_NUMBER"
 ```
+
+**IMPORTANT — do NOT check `mergeStateStatus` directly.** The `UNKNOWN` value is transient (can persist 2–30 s while GitHub recomputes merge status) and is not a reliable signal. `merge-mr.sh` handles all mergeability polling internally — it retries until the state resolves or a hard failure is confirmed. Attempting to read `mergeStateStatus` yourself and treating `UNKNOWN` as a failure will cause spurious aborts on perfectly mergeable PRs.
 
 **If merge fails:**
 - Log error with reason
