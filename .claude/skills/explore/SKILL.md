@@ -59,6 +59,12 @@ Refine the vague input into concrete requirements:
 - Document current behaviour vs desired behaviour
 - Note architectural patterns to follow
 
+**Test Surface Discovery (run after identifying affected files):**
+
+Run Phases 0–3 of the `test-discovery` skill against the touched files (cap at 5 files). The skill itself documents what each phase does.
+
+> **Graceful fallback:** If `.claude/skills/test-discovery/SKILL.md` does not exist, skip this sub-step and note "test-discovery skill unavailable" in the research findings.
+
 **Context Checkpoint (Optional):** If the research phase read many files or generated extensive tool output, consider writing a concise research summary to a temp file and suggesting `/clear` before evaluation. The evaluation and planning phases only need the summary, not the raw exploration context. Use `/create-session-summary` if checkpointing.
 
 ### Step 3: Evaluate Approaches
@@ -115,6 +121,19 @@ PLATFORM_DIR=".claude/scripts/platform"
 
 **Current behavior:** [what happens now]
 **Desired behavior:** [what should happen]
+
+## Relevant Existing Tests
+**Unit tests:**
+- `path/to/unit.test.ts:L1-30` — [what behavior is covered]
+
+**Consumer tests:**
+- `path/to/integration.test.ts:L1-30` — [what integration is covered]
+
+**E2E specs:**
+- `path/to/spec.e2e.ts:L1-30` — [what user flow is covered]
+
+**Coverage gaps:**
+- [what is not tested — inform implementation task descriptions]
 
 ## Evaluation
 **Approach:** [chosen approach — 1 sentence]
@@ -195,6 +214,8 @@ URL: https://github.com/...
 Ready for implementation: /implement-issue NNN main
 ```
 
+The issue body includes a **Relevant Existing Tests** section populated during Step 2 test surface discovery — implementers use this to know which tests to update and which coverage gaps remain.
+
 ## Task Format Specification
 
 The `## Implementation Tasks` section must use this parseable convention:
@@ -269,3 +290,4 @@ Task sizing directly controls model cost via `model-config.sh`:
 | Writing `[test-engineer]` as agent | Legacy alias — write `[playwright-test-developer]` for E2E or `[default]` for general tests |
 | Missing square brackets: `` `agent-name` `` instead of `` `[agent-name]` `` | Parser accepts it, but explicit brackets make intent clear — always use brackets |
 | Writing `[fullstack-engineer]` as agent | Unknown agent — normalizer silently downgrades to `default`, losing backend and frontend specialization; split into `[fastify-backend-developer]` + `[react-frontend-developer]` instead |
+| Skip test discovery when affected files are identified | Implementers won't know which tests to update or extend; new tests may duplicate existing coverage and gaps remain invisible |
