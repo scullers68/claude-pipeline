@@ -314,20 +314,22 @@ Scan all review comments for indicators of follow-up work:
 
 | Classification | Criteria | Action |
 |---|---|---|
-| **precise** | References a specific file or function AND covers ≤2 files in scope | Create issue immediately — enough context to implement |
-| **vague** | No file/function reference, broad scope, or uses open-ended trigger phrases alone | Attempt to expand via /explore; fall back to direct create with needs-explore label if /explore fails |
+| **precise** | References a specific file or function AND covers ≤2 files in scope | Create issue immediately — no `needs-explore` label; has enough context to implement |
+| **vague** | No file/function reference, broad scope, or uses open-ended trigger phrases alone | Create issue immediately with `needs-explore` label — a later `/enrich-issue` sweep researches and fleshes out the body |
 
-Open-ended trigger phrases that signal a **vague** follow-up (do not auto-create):
+> **Deprecation notice:** A previous version of this skill invoked `/explore` as a nested Claude CLI process to enrich vague follow-ups before creating them. That path is removed. The `batch-orchestrator.sh --enrich-followups` flag now handles enrichment asynchronously via the `enrich-issue` skill, which is idempotent and rate-limit-safe.
+
+Open-ended trigger phrases that signal a **vague** follow-up (create with `needs-explore` label):
 `"consider adding:"`, `"nice to have:"`, `"future improvement:"`, `"we could also..."`
 
 Examples:
 
 ```
-# PRECISE — create issue
+# PRECISE — create issue immediately (no needs-explore label)
 "follow-up needed: extract retry logic in scripts/merge-mr.sh:handle_merge() into a shared helper"
 "technical debt: auth/token.sh:validate_token doesn't handle clock skew — add leeway param"
 
-# VAGUE — skip, do not auto-create
+# VAGUE — create issue immediately WITH needs-explore label (enrich-issue sweep fleshes out later)
 "consider adding more tests"
 "future improvement: better error handling throughout"
 "nice to have: improve logging"
@@ -371,11 +373,12 @@ Task 2: $INFERRED_TASK_DESCRIPTION
 
 For each extracted issue (after deduplication check passes), route by classification:
 
-**Precise follow-up** — create issue immediately:
+**Precise follow-up** — create issue immediately (no `needs-explore` label — already has enough context to implement):
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
 "$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
+<!-- pipeline-autocreated -->
 ## Context
 Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
 
@@ -390,35 +393,25 @@ $EXTRACTED_DESCRIPTION
 - PR/MR: #$PR_NUMBER
 - Reviewer: @$REVIEWER
 EOF
-)" --labels "$LABELS"
+)" ${LABELS:+--labels "$LABELS"}
 ```
 
 Log each: `Created follow-up issue #XXX: "$TITLE"`
 
-**Vague follow-up** — invoke `/explore` to flesh out context before creating the issue:
+**Vague follow-up** — create issue immediately with `needs-explore` label; a later explore sweep will flesh it out:
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
-
-# Attempt to expand the vague item via /explore
-EXPLORE_OUTPUT=$(claude --dangerously-skip-permissions --print "/explore $(printf '%s' "$EXTRACTED_DESCRIPTION")" 2>&1)
-EXPLORE_EXIT=$?
-
-if [ $EXPLORE_EXIT -eq 0 ]; then
-  # /explore succeeded — it creates a fully-formed issue internally; log and continue
-  echo "Explored and created issue from vague item: \"$ISSUE_TITLE\""
-else
-  # /explore failed — fall back to direct creation with needs-explore label
-  echo "Warning: /explore failed (exit $EXPLORE_EXIT) for \"$ISSUE_TITLE\"; falling back to direct create with needs-explore label"
-  "$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
+"$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
+<!-- pipeline-autocreated -->
 ## Context
 Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
 
 ## Description
 $EXTRACTED_DESCRIPTION
 
-> **Note:** This item was classified as vague. The /explore subprocess failed to expand it.
-> A human should research and flesh out the implementation tasks before acting on this issue.
+> **Note:** This item was classified as vague and needs further research before implementation.
+> A human or automated explore sweep should flesh out the implementation tasks.
 
 ## References
 - Parent Issue: #$ISSUE_NUMBER
@@ -426,8 +419,9 @@ $EXTRACTED_DESCRIPTION
 - Reviewer: @$REVIEWER
 EOF
 )" --labels "${LABELS:+$LABELS,}needs-explore"
-fi
 ```
+
+Log each: `Created vague follow-up issue #XXX: "$TITLE" (needs-explore)`
 
 ---
 
