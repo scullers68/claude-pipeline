@@ -73,6 +73,7 @@ UNIVERSAL_SKILLS=(
     "test-validation"
     "fix-from-review"
     "test-discovery"
+    "enrich-issue"
 )
 
 # ---------------------------------------------------------------------------
