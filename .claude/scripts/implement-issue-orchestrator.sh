@@ -3980,6 +3980,8 @@ guard_commit_path_allowlist() {
 			prisma/** | */prisma/**) continue ;;
 			docker-compose*.yml) continue ;;
 			docs/**) continue ;;
+			.claude/agents/**) continue ;;
+			.claude/skills/**) continue ;;
 			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs)
 				continue ;;
 			*.sh | *.bats | *.py | *.go | *.rb | *.java | *.rs)

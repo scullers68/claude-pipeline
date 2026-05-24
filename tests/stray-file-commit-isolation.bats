@@ -103,6 +103,8 @@ _post_commit_path_allowlist_check() {
 			prisma/**) continue ;;
 			docker-compose*.yml) continue ;;
 			docs/**) continue ;;
+			.claude/agents/**) continue ;;
+			.claude/skills/**) continue ;;
 			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs | *.sh | *.bats)
 				continue
 				;;
@@ -294,6 +296,42 @@ _orchestrator_guard_function_name() {
 	run _post_commit_path_allowlist_check "$repo"
 	[ "$status" -eq 0 ] || {
 		printf 'FAIL: allowlist check rejected a docs/ commit: %s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(4d) reference allowlist check accepts a commit of only .claude/agents/ paths" {
+	local repo
+	repo="$(_make_repo guard-claude-agents)"
+
+	mkdir -p "$repo/.claude/agents"
+	printf '# Agent\n\nInstructions.\n' \
+		> "$repo/.claude/agents/code-reviewer.md"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "chore: update code-reviewer agent instructions"
+
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: allowlist check rejected a .claude/agents/ commit: %s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(4e) reference allowlist check accepts a commit of only .claude/skills/ paths" {
+	local repo
+	repo="$(_make_repo guard-claude-skills)"
+
+	mkdir -p "$repo/.claude/skills/pr-review"
+	printf '# Skill\n\nInstructions.\n' \
+		> "$repo/.claude/skills/pr-review/SKILL.md"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "chore: update pr-review skill"
+
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: allowlist check rejected a .claude/skills/ commit: %s\n' \
 			"$output" >&2
 		return 1
 	}
