@@ -97,6 +97,9 @@ Apply only the items relevant to the technology in the diff. Skip items that don
 - Assertions check meaningful values (no hollow `expect(true).toBe(true)`)
 - Test names describe the behavior being verified
 - No test-only methods added to production code
+- Mock-timing perf — `performance.now()` threshold inside a `jest.mock`/`vi.mock` file; e.g., `expect(delta).toBeLessThan(200)` where the timed function is mocked — the mock runs in nanoseconds so the threshold is never falsified
+- Constant-arithmetic tautology — `expect(<constant expr>).toBe(<constant>)` asserts compile-time arithmetic, not behaviour; e.g., `expect(30000 / 5).toBe(6000)` always passes and verifies nothing about the system under test
+- Self-referential matcher — `toBe`/`toEqual` compares the same property from two objects derived from the same source; e.g., `expect(result1.userThreshold).toBe(result2.userThreshold)` when both share the same seed — both could be wrong and the test still passes
 
 ## Severity Guide
 
