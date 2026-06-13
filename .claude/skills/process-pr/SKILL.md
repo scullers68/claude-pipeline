@@ -314,7 +314,7 @@ Scan all review comments for indicators of follow-up work:
 
 | Classification | Criteria | Action |
 |---|---|---|
-| **precise** | References a specific file or function AND covers ≤2 files in scope | Create issue immediately — no `needs-explore` label; has enough context to implement |
+| **precise** | References a specific file or function AND covers ≤2 files in scope | Create issue immediately with `needs-explore` label — precise context still benefits from enrichment |
 | **vague** | No file/function reference, broad scope, or uses open-ended trigger phrases alone | Create issue immediately with `needs-explore` label — a later `/enrich-issue` sweep researches and fleshes out the body |
 
 > **Deprecation notice:** A previous version of this skill invoked `/explore` as a nested Claude CLI process to enrich vague follow-ups before creating them. That path is removed. The `batch-orchestrator.sh --enrich-followups` flag now handles enrichment asynchronously via the `enrich-issue` skill, which is idempotent and rate-limit-safe.
@@ -373,7 +373,7 @@ Task 2: $INFERRED_TASK_DESCRIPTION
 
 For each extracted issue (after deduplication check passes), route by classification:
 
-**Precise follow-up** — create issue immediately (no `needs-explore` label — already has enough context to implement):
+**Precise follow-up** — create issue immediately with `needs-explore` label:
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
@@ -393,7 +393,7 @@ $EXTRACTED_DESCRIPTION
 - PR/MR: #$PR_NUMBER
 - Reviewer: @$REVIEWER
 EOF
-)" ${LABELS:+--labels "$LABELS"}
+)" --labels "${LABELS:+$LABELS,}needs-explore"
 ```
 
 Log each: `Created follow-up issue #XXX: "$TITLE"`
