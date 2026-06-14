@@ -375,7 +375,7 @@ fi
 1. Resume (continue with pending issues)
 2. Start fresh (abandon previous batch)
 
-If resuming, skip to Step 5 (launch orchestrator). The orchestrator's idempotency check will skip completed issues.
+If resuming, skip to Step 5 (launch orchestrator). The orchestrator calls `init_status` on startup; if a prior `status.json` for this batch exists, it preserves per-issue terminal statuses (`completed` and `already_implemented`) instead of resetting everything to `pending`. Non-terminal statuses (`failed`, `in_progress`) are reset to `pending` so they re-run. The main loop then skips any issue whose preserved status is `completed`, ensuring already-finished issues are not re-processed on relaunch.
 
 ### Step 1: Parse Context Query
 

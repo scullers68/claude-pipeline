@@ -325,11 +325,42 @@ emit_event() {
 # =============================================================================
 
 init_status() {
+    # Resume-awareness: when a status.json from a prior launch of this batch
+    # exists, preserve per-issue terminal state (completed/already_implemented)
+    # instead of resetting every issue to pending. Without this the
+    # idempotency skip in the primary loop is dead code — each relaunch
+    # would reset status to pending and re-run already-finished issues.
+    local prior_status="{}"
+    if [[ -f "$STATUS_FILE" ]]; then
+        # Build a {number: status} map of issues whose prior status was
+        # terminal. Non-terminal (pending/failed/in_progress) issues are
+        # intentionally omitted so they re-run on resume.
+        prior_status=$(jq -c '
+            [.issues[]?
+             | select(.status == "completed"
+                      or .status == "already_implemented")]
+            | map({(.number): .status})
+            | add // {}' "$STATUS_FILE" 2>/dev/null) || prior_status="{}"
+        if [[ -z "$prior_status" ]]; then
+            prior_status="{}"
+        fi
+    fi
+
+    local preserved_count=0
     local issues_json="[]"
     for issue in "${ISSUE_ARRAY[@]}"; do
-        issues_json=$(printf '%s' "$issues_json" | jq --arg num "$issue" '. + [{
+        local issue_status="pending"
+        local prior
+        prior=$(printf '%s' "$prior_status" \
+            | jq -r --arg num "$issue" '.[$num] // empty')
+        if [[ -n "$prior" ]]; then
+            issue_status="$prior"
+            preserved_count=$((preserved_count + 1))
+        fi
+        issues_json=$(printf '%s' "$issues_json" \
+            | jq --arg num "$issue" --arg status "$issue_status" '. + [{
             "number": $num,
-            "status": "pending",
+            "status": $status,
             "stage": null,
             "pr": null,
             "session_id": null,
@@ -341,10 +372,16 @@ init_status() {
         }]')
     done
 
+    local completed_count
+    completed_count=$(printf '%s' "$issues_json" \
+        | jq '[.[] | select(.status == "completed"
+                            or .status == "already_implemented")] | length')
+
     jq -n \
         --arg state "running" \
         --arg branch "$BRANCH" \
         --argjson total "${#ISSUE_ARRAY[@]}" \
+        --argjson completed "$completed_count" \
         --argjson issues "$issues_json" \
         --arg log_dir "$LOG_BASE" \
         '{
@@ -353,10 +390,10 @@ init_status() {
             current_issue: null,
             progress: {
                 total: $total,
-                completed: 0,
+                completed: $completed,
                 failed: 0,
                 merge_blocked: 0,
-                pending: $total,
+                pending: ($total - $completed),
                 in_progress: 0
             },
             issues: $issues,
@@ -369,6 +406,9 @@ init_status() {
             log_dir: $log_dir
         }' > "$STATUS_FILE"
 
+    if ((preserved_count > 0)); then
+        log "Resuming batch: preserved $preserved_count completed issue(s)"
+    fi
     log "Initialized status file: $STATUS_FILE"
 }
 
@@ -1036,6 +1076,40 @@ for issue in "${ISSUE_ARRAY[@]}"; do
     if [[ "$current_status" == "completed" ]]; then
         log "Skipping issue #$issue (already completed)"
         continue
+    fi
+
+    # ---------------------------------------------------------------
+    # Up-front skip gate: closed issue OR merged PR (via gh).
+    # Complements the status.json idempotency check above by querying
+    # live platform state before spinning up the orchestrator.
+    # Only active when GIT_HOST=github.  A gh failure (network error,
+    # unauthenticated) is non-fatal: the empty result falls through so
+    # the orchestrator's already_implemented detection remains the
+    # safety net.
+    # ---------------------------------------------------------------
+    if [[ "${GIT_HOST:-github}" == "github" ]]; then
+        _upfront_issue_state=""
+        _upfront_issue_state=$(gh issue view "$issue" --json state \
+            --jq '.state' 2>/dev/null) || true
+        if [[ "$_upfront_issue_state" == "CLOSED" ]]; then
+            log "Skipping issue #$issue (already closed on GitHub)"
+            update_issue_field "$issue" "status" "completed"
+            update_progress
+            continue
+        fi
+
+        _merged_pr=""
+        _merged_pr=$(gh pr list --state merged \
+            --head "feature/issue-$issue" \
+            --json number --jq '.[0].number // empty' \
+            2>/dev/null) || true
+        if [[ -n "$_merged_pr" ]]; then
+            log "Skipping issue #$issue (PR #$_merged_pr already merged)"
+            update_issue_field "$issue" "status" "completed"
+            update_issue_field "$issue" "pr" "$_merged_pr" "true"
+            update_progress
+            continue
+        fi
     fi
 
     if process_issue "$issue"; then
