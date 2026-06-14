@@ -205,10 +205,17 @@ fi
 
 # --- 3. Implement (skip if already completed) ------------------------------
 
+_pre_impl_porcelain=""
+_changed_paths=()
+
 if is_stage_completed fast_path_implement; then
     log "fast_path_implement already completed — skipping (resume)"
 else
     set_stage_in_progress fast_path_implement
+
+    # Snapshot working-tree state before implement so we can compute
+    # the changed-path delta afterward and stage only those files.
+    _pre_impl_porcelain=$(git status --porcelain 2>/dev/null || true)
 
     issue_body_file="$LOG_BASE/context/issue-body.md"
     issue_body=""
@@ -258,6 +265,50 @@ PROMPT
         bail "implement_returned_${impl_status}"
     fi
 
+    # Compute which paths the implement step added or modified.
+    # Stage only these files later — not the entire working tree.
+    _post_impl_porcelain=$(git status --porcelain 2>/dev/null || true)
+    while IFS= read -r _impl_line; do
+        if [[ -z "$_impl_line" ]]; then
+            continue
+        fi
+        _impl_path="${_impl_line:3}"
+        if [[ "$_impl_path" == *" -> "* ]]; then
+            _impl_path="${_impl_path##* -> }"
+        fi
+        _impl_path="${_impl_path#\"}"
+        _impl_path="${_impl_path%\"}"
+        _changed_paths+=("$_impl_path")
+    done < <(comm -13 \
+        <(printf '%s\n' "$_pre_impl_porcelain" | sort) \
+        <(printf '%s\n' "$_post_impl_porcelain" | sort))
+
+    # Scope guard: abort before commit if the implement delta contains paths
+    # that are never legitimate fast-path targets — pipeline internals
+    # (.claude/), documentation (docs/), or build-artifact directories.
+    # This prevents a misbehaving implement from silently modifying the
+    # pipeline itself and slipping through code review.
+    _out_of_scope_prefixes=(
+        ".claude/"
+        "docs/"
+        "dist/"
+        "build/"
+        ".next/"
+        ".nuxt/"
+        "coverage/"
+        "node_modules/"
+    )
+    if [[ ${#_changed_paths[@]} -gt 0 ]]; then
+        for _guard_path in "${_changed_paths[@]}"; do
+            for _prefix in "${_out_of_scope_prefixes[@]}"; do
+                if [[ "$_guard_path" == "${_prefix}"* ]]; then
+                    log "Scope guard: out-of-scope path in staged delta: $_guard_path"
+                    bail "out_of_scope_path_staged"
+                fi
+            done
+        done
+    fi
+
     set_stage_completed fast_path_implement
     log "Fast-path implement complete"
 fi
@@ -276,7 +327,12 @@ if is_stage_completed fast_path_pr; then
 else
     set_stage_in_progress fast_path_pr
 
-    git add -A 2>>"$LOG_FILE"
+    if [[ ${#_changed_paths[@]} -gt 0 ]]; then
+        git add -- "${_changed_paths[@]}" 2>>"$LOG_FILE"
+    else
+        # Resume: implement ran in a prior invocation; stage current state.
+        git add -A 2>>"$LOG_FILE"
+    fi
 
     hook_stderr="$LOG_BASE/stages/fast-path-commit.stderr"
     commit_msg="feat(issue-${ISSUE_NUMBER}): surgical fast-path change
