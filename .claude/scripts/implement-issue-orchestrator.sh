@@ -2154,7 +2154,10 @@ for m in re.finditer(r'\[\s*\{', t):
             # the stage log.  Flow control is handled via structured output
             # extraction below, not via this value.
             local _esc_exit_code=0
-            output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+            # Temp-file capture (see run_stage's primary launch) — avoids the
+            # command-substitution pipe-wedge when the CLI leaves a lingering child.
+            local _esc_raw; _esc_raw=$(mktemp)
+            timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
                 -p "$prompt" \
                 ${agent_args[@]+"${agent_args[@]}"} \
                 --model "$_esc_model" \
@@ -2163,7 +2166,8 @@ for m in re.finditer(r'\[\s*\{', t):
                 --dangerously-skip-permissions \
                 --output-format json \
                 --json-schema "$schema" \
-                2>&1) || _esc_exit_code=$?
+                > "$_esc_raw" 2>&1 || _esc_exit_code=$?
+            output=$(cat "$_esc_raw"); rm -f "$_esc_raw"
 
             result_model="$_esc_model"
             printf '%s\n' "=== $stage_name escalation output ===" >> "$stage_log"
@@ -2229,7 +2233,10 @@ for m in re.finditer(r'\[\s*\{', t):
                 "stage_attempt:=2"
 
             local _retry_exit_code=0
-            output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+            # Temp-file capture (see run_stage's primary launch) — avoids the
+            # command-substitution pipe-wedge when the CLI leaves a lingering child.
+            local _retry_raw; _retry_raw=$(mktemp)
+            timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
                 -p "$prompt" \
                 ${agent_args[@]+"${agent_args[@]}"} \
                 --model "$model" \
@@ -2238,7 +2245,8 @@ for m in re.finditer(r'\[\s*\{', t):
                 --dangerously-skip-permissions \
                 --output-format json \
                 --json-schema "$schema" \
-                2>&1) || _retry_exit_code=$?
+                > "$_retry_raw" 2>&1 || _retry_exit_code=$?
+            output=$(cat "$_retry_raw"); rm -f "$_retry_raw"
 
             printf '%s\n' "=== $stage_name retry output ===" >> "$stage_log"
             printf '%s\n' "$output" >> "$stage_log"
@@ -4443,6 +4451,20 @@ execute_batch_parallel() {
 		elif [[ "$rstatus" != "success" ]]; then
 			log_error "Task $tid failed in worktree" \
 				"(status: $rstatus)"
+			failed+=("$tid")
+			cleanup_worktree "$wp" "$wb"
+			continue
+		fi
+
+		# Silent no-op guard: a subagent can self-report
+		# {"status":"success"} yet commit nothing to its worktree. Merging an
+		# empty branch is a git no-op ("Already up to date", rc 0), so without
+		# this check the task is counted "completed" and the issue sails to a
+		# false-green PR with the intended changes never landed. Treat an empty
+		# worktree branch as a failed task so it surfaces in the task summary.
+		if [[ -z "$(git rev-list "${feature_branch}..${wb}" 2>/dev/null)" ]]; then
+			log_error "Task $tid reported success but produced no commits" \
+				"— marking failed (silent no-op guard)"
 			failed+=("$tid")
 			cleanup_worktree "$wp" "$wb"
 			continue
@@ -7171,23 +7193,29 @@ $impl_summary" "$tagent"
             "$branch_scope" "$max_task_size" "$pipeline_profile"
 
         # ---------------------------------------------------------------------
-        # NON-BLOCKING FULL-SCOPE CHECK (informational only)
-        # After PR tests pass, run jest --changedSince once to surface any
-        # pre-existing failures pulled in by the dependency graph.  This does
-        # NOT block the pipeline — failures are posted as an informational
-        # issue comment so maintainers are aware.
+        # NON-BLOCKING FULL-SUITE CHECK (informational + degraded-stage signal)
+        # The smart-targeted test_loop only runs tests related to the changed
+        # files, so a suite broken without a related change — e.g. a task that
+        # should have fixed it but produced nothing (see #468) — can pass the
+        # loop yet leave `npm test` red. Run the FULL suite ($TEST_UNIT_CMD)
+        # once here to surface that; --changedSince shares the same dependency-
+        # graph blind spot and would miss it. Kept NON-BLOCKING because the base
+        # branch itself may legitimately be red; failures are posted as a comment
+        # AND recorded in DEGRADED_STAGES so they show up in the pipeline summary
+        # instead of being silently reported green.
         # ---------------------------------------------------------------------
         if [[ "$branch_scope" == "typescript" || "$branch_scope" == "mixed" || "$branch_scope" == "ts-frontend" ]]; then
-            log "Running informational full-scope check (non-blocking)..."
+            log "Running informational full-suite check (non-blocking)..."
             local full_scope_output full_scope_rc
-            full_scope_output=$(cd "." && npx jest --passWithNoTests --changedSince="$BASE_BRANCH" 2>&1) || true
+            full_scope_output=$(cd "." && eval "${TEST_UNIT_CMD:-npm test}" 2>&1) || true
             full_scope_rc=$?
 
             if (( full_scope_rc != 0 )); then
                 local full_scope_failures
                 full_scope_failures=$(printf '%s' "$full_scope_output" | tail -40)
-                comment_issue "Full-Scope Check: Pre-existing Failures (informational)" \
-                    "ℹ️ A full \`jest --changedSince=$BASE_BRANCH\` run found additional failures outside the PR-changed test files. These are **pre-existing** and do **not** block this pipeline.
+                DEGRADED_STAGES+=("test:full_suite_red")
+                comment_issue "Full-Suite Check: test suite is RED (non-blocking)" \
+                    "⚠️ The full \`${TEST_UNIT_CMD:-npm test}\` run failed on this branch. The smart-targeted test loop only runs tests related to the changed files, so these failures were not caught there. They may be **pre-existing on \`$BASE_BRANCH\`** OR failures this PR was expected to fix — **review before merge; do not assume green.**
 
 <details>
 <summary>Failure details (last 40 lines)</summary>
@@ -7196,9 +7224,33 @@ $impl_summary" "$tagent"
 $full_scope_failures
 \`\`\`
 </details>" "default"
-                log "INFO: Full-scope check found pre-existing failures (non-blocking)"
+                log "WARN: Full-suite check found failures (non-blocking, recorded as degraded)"
             else
-                log "Full-scope check passed — no additional failures"
+                log "Full-suite check passed — $TEST_UNIT_CMD is green on this branch"
+            fi
+        fi
+
+        # ---------------------------------------------------------------------
+        # E2E-UNVALIDATED GUARD: the test loop above is unit-only when
+        # TEST_E2E_CMD is unset. If this branch changed Playwright e2e infra or
+        # specs, NONE of it was executed here — a runtime-only bug (e.g. #481's
+        # `await import()` of a .ts in globalSetup) passes tsc/lint/jest and
+        # merges broken. Surface it loudly (non-blocking) so a human runs
+        # Playwright before trusting the PR.
+        # ---------------------------------------------------------------------
+        if [[ -z "${TEST_E2E_CMD:-}" ]]; then
+            local e2e_changed
+            e2e_changed=$(git diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null \
+                | grep -E '^(tests/e2e/|playwright\.config\.)' || true)
+            if [[ -n "$e2e_changed" ]]; then
+                DEGRADED_STAGES+=("test:e2e_unvalidated")
+                comment_issue "E2E NOT validated by the test loop" \
+                    "⚠️ This branch changes Playwright e2e files, but \`TEST_E2E_CMD\` is unset so the test loop ran **unit tests only** — the e2e specs/infra here were **not executed**. tsc/lint/jest cannot catch runtime-only e2e bugs (e.g. a dynamic import of a \`.ts\` in globalSetup). **Run Playwright manually before trusting this PR.**
+
+\`\`\`
+$e2e_changed
+\`\`\`" "default"
+                log "WARN: e2e files changed but not validated (TEST_E2E_CMD unset) — recorded as degraded"
             fi
         fi
 
