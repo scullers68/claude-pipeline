@@ -520,6 +520,7 @@ invoke_fast_path_script() {
     export MOCK_GIT_DIRTY=1
     export MOCK_GH_MERGE_STATE=CLEAN
     export MOCK_GH_PR_NUMBER=99
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
 
     run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
@@ -554,6 +555,7 @@ invoke_fast_path_script() {
 
 @test "14 fast-path bails on hook failure → captures stderr to triage.json.hook_failure_output" {
     export MOCK_GIT_HOOK_FAILURE=1
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
     # triage.json must already exist from a prior triage stage call
     mkdir -p "$LOG_BASE"
     echo '{"route":"fast-path"}' > "$LOG_BASE/triage.json"
@@ -569,6 +571,7 @@ invoke_fast_path_script() {
 
 @test "15 fast-path bails cleanly on push rejection → state=failed, error=push_rejected" {
     export MOCK_GIT_PUSH_EXIT_CODE=1
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
 
     run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
@@ -595,6 +598,7 @@ invoke_fast_path_script() {
 @test "17 fast-path happy path → branch + PR + merge succeed, state=completed" {
     export MOCK_GH_MERGE_STATE=CLEAN
     export MOCK_GH_PR_NUMBER=99
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
 
     run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
@@ -711,6 +715,7 @@ JSON
     export MOCK_GH_PR_NUMBER=42
     export FAST_PATH_MERGE_CHECK_ATTEMPTS=5
     export FAST_PATH_MERGE_CHECK_DELAY=0
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
 
     run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
@@ -849,4 +854,57 @@ JSON
     # fast_path_pr must NOT be completed — commit was aborted.
     pr_status=$(jq -r '.stages.fast_path_pr.status // "pending"' "$STATUS_FILE")
     [[ "$pr_status" != "completed" ]]
+}
+
+# ============================================================================
+# EMPTY _changed_paths GUARD + RESUME STAGING (issue #409)
+# ============================================================================
+
+@test "27 empty _changed_paths on fresh start → bail empty_changed_paths, no git add -A" {
+    # When implement returns success but the before/after porcelain snapshot
+    # diff is empty (implement made no file changes), the script must bail
+    # with empty_changed_paths instead of silently committing nothing or
+    # falling through to git add -A, which is only correct on resume.
+    [ -x "$REAL_SCRIPT_DIR/surgical-fast-path.sh" ] || skip "fast-path not present"
+
+    # MOCK_GIT_POST_IMPL_FILES deliberately unset: the post-implement git
+    # status returns nothing so the before/after comm produces an empty delta.
+    export MOCK_GH_MERGE_STATE=CLEAN
+    export MOCK_GH_PR_NUMBER=99
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -ne 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'failed'
+    assert_json_field "$STATUS_FILE" '.error' 'empty_changed_paths'
+    # git add -A must NOT have been called — whole-tree staging is wrong
+    # on a fresh run where implement made no detectable changes.
+    ! grep -qF -- '-A' "$TEST_TMP/git-add-args" 2>/dev/null
+}
+
+@test "28 resume with implement completed → uses git add -A to stage current tree" {
+    # When fast_path_implement was completed in a prior invocation (resume),
+    # _changed_paths is not populated this run. The script must fall back to
+    # git add -A so the prior run's changes are staged before commit, rather
+    # than bailing with empty_changed_paths.
+    [ -x "$REAL_SCRIPT_DIR/surgical-fast-path.sh" ] || skip "fast-path not present"
+
+    # Pre-seed status.json: implement already done.
+    jq '.stages.fast_path_implement.status = "completed" |
+        .stages.fast_path_implement.completed_at = (now | todate)' \
+        "$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+    # Make claude fail — on resume the implement block must never be reached.
+    export MOCK_CLAUDE_EXIT_CODE=1
+    export MOCK_GH_MERGE_STATE=CLEAN
+    export MOCK_GH_PR_NUMBER=55
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'completed'
+    assert_json_field "$STATUS_FILE" '.stages.fast_path_pr.status' 'completed'
+    assert_json_field "$STATUS_FILE" '.stages.fast_path_merge.status' 'completed'
+    # git add -A must have been used to stage the prior invocation's changes.
+    grep -qF -- '-A' "$TEST_TMP/git-add-args"
 }
