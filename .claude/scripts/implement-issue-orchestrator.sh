@@ -116,6 +116,31 @@ TEST_ITER_WALL_TIME_SLACK="${TEST_ITER_WALL_TIME_SLACK:-120}"
 # replaces test-iter-timeout×planned_iter+slack entirely.
 TEST_LOOP_WALL_BUDGET="${TEST_LOOP_WALL_BUDGET:-}"
 
+# Per-command timeouts (seconds) for the merge_pr stage.  Each long-running
+# sub-step is wrapped in `timeout` so a hung network/git/CLI call cannot stall
+# the orchestrator indefinitely.  On timeout the stage transitions to
+# merge_pr_timeout and the orchestrator exits in the error state.
+#   MERGE_MR_STEP_TIMEOUT : merge-mr.sh (PR/MR merge)
+#   MERGE_GIT_TIMEOUT     : git fetch / checkout / pull
+#   MERGE_COMMENT_TIMEOUT : post-merge completion comment
+# Override any of these via env to tune for slow remotes.
+MERGE_MR_STEP_TIMEOUT="${MERGE_MR_STEP_TIMEOUT:-120}"
+MERGE_GIT_TIMEOUT="${MERGE_GIT_TIMEOUT:-60}"
+MERGE_COMMENT_TIMEOUT="${MERGE_COMMENT_TIMEOUT:-60}"
+
+# Per-command timeouts (seconds) for the validate_plan, implement, and
+# test_loop stages.  Each long-running git/network sub-step is wrapped in
+# `timeout` so a hung subprocess cannot pin the stage indefinitely.
+#   VALIDATE_PLAN_GIT_TIMEOUT     : git rev-list (early scope check)
+#   VALIDATE_PLAN_COMMENT_TIMEOUT : post-validation plan comment
+#   IMPLEMENT_GIT_TIMEOUT         : git checkout at end of implement loop
+#   TEST_LOOP_GIT_TIMEOUT         : git diff for changed-file detection
+# Override any of these via env to tune for slow remotes.
+VALIDATE_PLAN_GIT_TIMEOUT="${VALIDATE_PLAN_GIT_TIMEOUT:-30}"
+VALIDATE_PLAN_COMMENT_TIMEOUT="${VALIDATE_PLAN_COMMENT_TIMEOUT:-60}"
+IMPLEMENT_GIT_TIMEOUT="${IMPLEMENT_GIT_TIMEOUT:-30}"
+TEST_LOOP_GIT_TIMEOUT="${TEST_LOOP_GIT_TIMEOUT:-30}"
+
 # Kill-switch for emergency bash fallback.  The escalation-policy skill is
 # now the default routing backend.  Set ESCALATION_POLICY_BACKEND=bash to
 # force the inline bash decision tree instead.
@@ -1224,6 +1249,7 @@ comment_issue() {
 	local title="$1"
 	local body="$2"
 	local agent="${3:-}"
+	local timeout_sec="${4:-}"
 	local attribution
 
 	if [[ -n "$agent" ]]; then
@@ -1242,9 +1268,20 @@ EOF
 )
 
 	log "Commenting on issue #$ISSUE_NUMBER: $title"
-	if ! "$PLATFORM_DIR/comment-issue.sh" "$ISSUE_NUMBER" "$comment" 2>>"${LOG_FILE:-/dev/stderr}"; then
+	local _ci_exit
+	if [[ -n "$timeout_sec" ]]; then
+		timeout "$timeout_sec" "$PLATFORM_DIR/comment-issue.sh" "$ISSUE_NUMBER" "$comment" \
+			2>>"${LOG_FILE:-/dev/stderr}"
+		_ci_exit=$?
+	else
+		"$PLATFORM_DIR/comment-issue.sh" "$ISSUE_NUMBER" "$comment" \
+			2>>"${LOG_FILE:-/dev/stderr}"
+		_ci_exit=$?
+	fi
+	if (( _ci_exit != 0 )); then
 		log_error "Failed to comment on issue #$ISSUE_NUMBER"
 	fi
+	return $_ci_exit
 }
 
 # comment_pr <pr_num> <title> <body> [agent]
@@ -5373,7 +5410,15 @@ run_test_loop() {
     local jest_test_files=""
     local playwright_test_files=""
     if [[ "$change_scope" == "typescript" || "$change_scope" == "mixed" || "$change_scope" == "ts-frontend" ]]; then
-        changed_test_files=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null \
+        local _tl_git_raw _tl_git_exit
+        _tl_git_raw=$(timeout "$TEST_LOOP_GIT_TIMEOUT" git -C "$loop_dir" diff \
+            "$BASE_BRANCH"...HEAD --name-only 2>/dev/null)
+        _tl_git_exit=$?
+        if (( _tl_git_exit == 124 )); then
+            log_warn "test_loop: git diff timed out after ${TEST_LOOP_GIT_TIMEOUT}s — using --changedSince fallback"
+            _tl_git_raw=""
+        fi
+        changed_test_files=$(printf '%s' "$_tl_git_raw" \
             | grep -E '\.test\.[jt]sx?$|\.spec\.[jt]sx?$' \
             | grep -v '\.integration\.test\.' \
             || true)
@@ -6425,6 +6470,18 @@ Investigate the root cause and fix the issue. Commit your changes."
 	return 0
 }
 
+# _handle_merge_pr_timeout <cmd_label> <limit_secs>
+# Sets current_stage to merge_pr_timeout, calls set_final_state "error",
+# and exits 1.  Called on any per-command timeout inside merge_pr stage.
+_handle_merge_pr_timeout() {
+	local cmd_label="$1"
+	local limit_secs="$2"
+	log_error "merge_pr: ${cmd_label} timed out after ${limit_secs}s"
+	set_stage_started "merge_pr_timeout"
+	set_final_state "error"
+	exit 1
+}
+
 # =============================================================================
 # PRIOR-PR LOOKUP HELPER
 # =============================================================================
@@ -6781,7 +6838,17 @@ $excerpt
     # -------------------------------------------------------------------------
     local early_scope="code"
     local early_commit_count
-    early_commit_count=$(git rev-list --count "${BASE_BRANCH}..${branch}" 2>/dev/null || echo "0")
+    local _vp_git_exit
+    early_commit_count=$(timeout "$VALIDATE_PLAN_GIT_TIMEOUT" \
+        git rev-list --count "${BASE_BRANCH}..${branch}" 2>/dev/null)
+    _vp_git_exit=$?
+    if (( _vp_git_exit == 124 )); then
+        log_warn "validate_plan: git rev-list timed out after" \
+            "${VALIDATE_PLAN_GIT_TIMEOUT}s — defaulting to 0 commits"
+        early_commit_count=0
+    elif (( _vp_git_exit != 0 )); then
+        early_commit_count=0
+    fi
 
     if (( early_commit_count > 0 )); then
         early_scope=$(detect_change_scope "." "$BASE_BRANCH")
@@ -6896,7 +6963,7 @@ $((i+1)). \`[$agent]\` $desc"
 **Tasks:**
 $task_list_md
 
-**Branch:** \`$branch\`"
+**Branch:** \`$branch\`" "" "$VALIDATE_PLAN_COMMENT_TIMEOUT"
 
         set_stage_completed "validate_plan"
         log "Plan validation complete."
@@ -7182,7 +7249,11 @@ $impl_summary" "$tagent"
             fi
 
             # Ensure we are on the feature branch
-            git checkout "$branch" 2>&1 >/dev/null || true
+            timeout "$IMPLEMENT_GIT_TIMEOUT" git checkout "$branch" 2>&1 >/dev/null
+            local _impl_git_exit=$?
+            if (( _impl_git_exit == 124 )); then
+                log_warn "implement: git checkout $branch timed out after ${IMPLEMENT_GIT_TIMEOUT}s"
+            fi
         done
 
         set_stage_completed "implement"
@@ -8040,22 +8111,13 @@ $merge_blocked_reason}" \
         log "merge_pr: merge-in-progress comment posted"
         log "merge_pr: invoking merge-mr.sh for PR #$pr_number"
 
-        if "$PLATFORM_DIR/merge-mr.sh" "$pr_number" >>"${LOG_FILE:-/dev/null}" 2>&1; then
-            log "merge_pr: merge-mr.sh succeeded for PR #$pr_number"
-            log "PR #$pr_number merged successfully. Switching to $BASE_BRANCH..."
-            log "merge_pr: git fetch origin"
-            git fetch origin >>"${LOG_FILE:-/dev/null}" 2>&1
-            log "merge_pr: git checkout $BASE_BRANCH"
-            git checkout "$BASE_BRANCH" >>"${LOG_FILE:-/dev/null}" 2>&1
-            log "merge_pr: git pull"
-            git pull >>"${LOG_FILE:-/dev/null}" 2>&1
-            log "merge_pr: git fetch/checkout/pull complete"
-            log "Now on $BASE_BRANCH (up to date)"
-            comment_issue "Merge: Complete" \
-                "✅ PR #$pr_number merged into \`$BASE_BRANCH\` successfully." \
-                "default"
-            set_stage_completed "merge_pr"
-        else
+        local _merge_exit
+        timeout "$MERGE_MR_STEP_TIMEOUT" "$PLATFORM_DIR/merge-mr.sh" \
+            "$pr_number" >>"${LOG_FILE:-/dev/null}" 2>&1
+        _merge_exit=$?
+        if (( _merge_exit == 124 )); then
+            _handle_merge_pr_timeout "merge-mr.sh" "$MERGE_MR_STEP_TIMEOUT"
+        elif (( _merge_exit != 0 )); then
             log "merge_pr: merge-mr.sh failed for PR #$pr_number"
             log_error "Failed to merge PR #$pr_number"
             comment_issue "Merge: Failed" \
@@ -8064,6 +8126,78 @@ $merge_blocked_reason}" \
             set_final_state "error"
             exit 1
         fi
+
+        log "merge_pr: merge-mr.sh succeeded for PR #$pr_number"
+        log "PR #$pr_number merged successfully. Switching to $BASE_BRANCH..."
+
+        log "merge_pr: git fetch origin"
+        timeout "$MERGE_GIT_TIMEOUT" git fetch origin \
+            >>"${LOG_FILE:-/dev/null}" 2>&1
+        _merge_exit=$?
+        if (( _merge_exit == 124 )); then
+            _handle_merge_pr_timeout "git fetch origin" "$MERGE_GIT_TIMEOUT"
+        elif (( _merge_exit != 0 )); then
+            log_error "merge_pr: git fetch origin failed (exit $_merge_exit)"
+            comment_issue "Merge: Git Error" \
+                "❌ \`git fetch origin\` failed (exit ${_merge_exit}) after merging PR #${pr_number}. Manual recovery may be needed." \
+                "default"
+            set_final_state "error"
+            exit 1
+        fi
+
+        log "merge_pr: git checkout $BASE_BRANCH"
+        timeout "$MERGE_GIT_TIMEOUT" git checkout "$BASE_BRANCH" \
+            >>"${LOG_FILE:-/dev/null}" 2>&1
+        _merge_exit=$?
+        if (( _merge_exit == 124 )); then
+            _handle_merge_pr_timeout "git checkout $BASE_BRANCH" "$MERGE_GIT_TIMEOUT"
+        elif (( _merge_exit != 0 )); then
+            log_error "merge_pr: git checkout $BASE_BRANCH failed (exit $_merge_exit)"
+            comment_issue "Merge: Git Error" \
+                "❌ \`git checkout $BASE_BRANCH\` failed (exit ${_merge_exit}) after merging PR #${pr_number}. Manual recovery may be needed." \
+                "default"
+            set_final_state "error"
+            exit 1
+        fi
+
+        log "merge_pr: git pull"
+        timeout "$MERGE_GIT_TIMEOUT" git pull >>"${LOG_FILE:-/dev/null}" 2>&1
+        _merge_exit=$?
+        if (( _merge_exit == 124 )); then
+            _handle_merge_pr_timeout "git pull" "$MERGE_GIT_TIMEOUT"
+        elif (( _merge_exit != 0 )); then
+            log_error "merge_pr: git pull failed (exit $_merge_exit)"
+            comment_issue "Merge: Git Error" \
+                "❌ \`git pull\` failed (exit ${_merge_exit}) after merging PR #${pr_number}. Manual recovery may be needed." \
+                "default"
+            set_final_state "error"
+            exit 1
+        fi
+
+        log "merge_pr: git fetch/checkout/pull complete"
+        log "Now on $BASE_BRANCH (up to date)"
+
+        if [[ "${QUIET:-false}" != "true" ]]; then
+            log "merge_pr: posting merge-complete comment on issue"
+            local _merge_comment
+            _merge_comment=$(cat <<EOF
+## Merge: Complete
+###### *Posted by \`implement-issue-orchestrator\`*
+
+✅ PR #$pr_number merged into \`$BASE_BRANCH\` successfully.
+EOF
+)
+            timeout "$MERGE_COMMENT_TIMEOUT" "$PLATFORM_DIR/comment-issue.sh" \
+                "$ISSUE_NUMBER" "$_merge_comment" \
+                2>>"${LOG_FILE:-/dev/stderr}"
+            _merge_exit=$?
+            (( _merge_exit == 124 )) \
+                && _handle_merge_pr_timeout \
+                    "comment-issue.sh" "$MERGE_COMMENT_TIMEOUT"
+        fi
+
+        set_stage_completed "merge_pr"
+        set_final_state "completed"
     fi
 
     # -------------------------------------------------------------------------
