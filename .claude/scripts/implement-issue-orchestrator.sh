@@ -157,6 +157,7 @@ readonly RATE_LIMIT_DEFAULT_WAIT=3600
 # subsequent stages escalate via effective_model instead of sleeping.
 # Env-overridable for tests / tuning. See issue #364.
 readonly RATE_LIMIT_EXHAUSTION_THRESHOLD="${RATE_LIMIT_EXHAUSTION_THRESHOLD:-1800}"
+readonly _AGENT_SENTINEL_DEFAULT="default"
 
 # =============================================================================
 # PORTABLE TIMEOUT (macOS does not ship GNU timeout)
@@ -1676,7 +1677,7 @@ run_stage() {
         "stage_attempt:=1"
 
     local -a agent_args=()
-    if [[ -n "$agent" && "$agent" != "default" ]]; then
+    if [[ -n "$agent" && "$agent" != "$_AGENT_SENTINEL_DEFAULT" ]]; then
         agent_args=(--agent "$agent")
     fi
 
@@ -3437,8 +3438,8 @@ _normalize_agent_name() {
 	fi
 
 	# Unknown name with no local definition — fall back to generic agent.
-	log_warn "_normalize_agent_name: unknown agent '${name}' — falling back to 'default'"
-	printf '%s' "default"
+	log_warn "_normalize_agent_name: unknown agent '${name}' — falling back to '$_AGENT_SENTINEL_DEFAULT'"
+	printf '%s' "$_AGENT_SENTINEL_DEFAULT"
 }
 
 #
