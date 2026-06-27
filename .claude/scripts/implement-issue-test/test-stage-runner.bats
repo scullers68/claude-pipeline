@@ -562,12 +562,39 @@ teardown() {
     }
     export -f timeout
 
-    run_stage "test" "prompt" "test-schema.json" "fastify-backend-developer"
+    # Use `run` so the assertion targets the recorded CLI args (written by the
+    # mock before any post-launch action) rather than run_stage's exit status —
+    # mirrors the 'default' sentinel test below.
+    run run_stage "test" "prompt" "test-schema.json" "fastify-backend-developer"
 
     # Verify agent was passed to claude
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--agent fastify-backend-developer" "$claude_calls" || \
         fail "Agent 'fastify-backend-developer' was not passed to claude. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage omits --agent flag when agent sentinel is 'default'" {
+    # 'default' is the sentinel _normalize_agent_name emits for unresolvable
+    # agent names. run_stage must NOT pass --agent default to the CLI.
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift  # skip timeout value
+        shift  # skip 'env'
+        shift  # skip '-u'
+        shift  # skip 'CLAUDECODE'
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run run_stage "test" "prompt" "test-schema.json" "default"
+
+    # Claude must have been invoked (the mock timeout() wrote the call)
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    # --agent must NOT appear in the recorded call args
+    if grep -q -- "--agent" "$claude_calls"; then
+        fail "--agent must not be passed when sentinel is 'default'. Calls: $(cat "$claude_calls")"
+    fi
 }
 
 # =============================================================================
