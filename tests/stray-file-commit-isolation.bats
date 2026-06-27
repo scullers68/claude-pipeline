@@ -99,6 +99,8 @@ _post_commit_path_allowlist_check() {
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
 		case "$path" in
+			# Hard denylist — not overridable by EXTRA_COMMIT_PATHS.
+			.github/workflows/**) bad+=("$path") ;;
 			tests/*) continue ;;
 			prisma/**) continue ;;
 			docker-compose*.yml) continue ;;
@@ -108,7 +110,21 @@ _post_commit_path_allowlist_check() {
 			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs | *.sh | *.bats)
 				continue
 				;;
-			*) bad+=("$path") ;;
+			*)
+				if [[ -n "${EXTRA_COMMIT_PATHS:-}" ]]; then
+					local -a _extra
+					local ep
+					IFS='|' read -ra _extra \
+						<<< "$EXTRA_COMMIT_PATHS"
+					for ep in "${_extra[@]}"; do
+						[[ -n "$ep" ]] || continue
+						# shellcheck disable=SC2254
+						case "$path" in
+							$ep) continue 2 ;;
+						esac
+					done
+				fi
+				bad+=("$path") ;;
 		esac
 	done < <(_head_commit_paths "$dir")
 
@@ -337,6 +353,40 @@ _orchestrator_guard_function_name() {
 	}
 }
 
+@test "(4f) reference allowlist: accepts package.json and lock file when EXTRA_COMMIT_PATHS opts them in" {
+	local repo
+	repo="$(_make_repo guard-pkg-json)"
+
+	printf '{"name":"app","version":"1.0.0"}\n' \
+		> "$repo/package.json"
+	printf '# auto-generated lockfile\n' \
+		> "$repo/package-lock.json"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "feat: install sanitize-html"
+
+	# Rejected when EXTRA_COMMIT_PATHS is unset.
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -ne 0 ] \
+		|| fail "expected rejection without EXTRA_COMMIT_PATHS"
+	[[ "$output" == *"package.json"* \
+		|| "$output" == *"package-lock.json"* ]] || {
+		printf \
+			'FAIL: expected error to name package.json/lock, got:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+
+	# Accepted when EXTRA_COMMIT_PATHS opts them in.
+	EXTRA_COMMIT_PATHS="package.json|package-lock.json"
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf \
+			'FAIL: expected acceptance with package.json in EXTRA_COMMIT_PATHS:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
 @test "(5a) reference allowlist check rejects a commit that includes .github/workflows/ paths" {
 	local repo
 	repo="$(_make_repo guard-github-workflows)"
@@ -353,6 +403,31 @@ _orchestrator_guard_function_name() {
 		|| fail "allowlist check accepted a .github/workflows/ commit"
 	[[ "$output" == *".github/workflows/ci.yml"* ]] || {
 		printf 'FAIL: expected error to name .github/workflows/ci.yml, got:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(5b) reference allowlist: .github/workflows/*.yml stays blocked even with EXTRA_COMMIT_PATHS" {
+	local repo
+	repo="$(_make_repo guard-workflows-nodoor)"
+
+	mkdir -p "$repo/.github/workflows"
+	printf \
+		'name: ci\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n' \
+		> "$repo/.github/workflows/ci.yml"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "chore: add workflow"
+
+	# Stays blocked even when EXTRA_COMMIT_PATHS explicitly targets workflows.
+	EXTRA_COMMIT_PATHS=".github/workflows/**"
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -ne 0 ] || {
+		fail ".github/workflows/ must remain blocked regardless of EXTRA_COMMIT_PATHS"
+	}
+	[[ "$output" == *".github/workflows/ci.yml"* ]] || {
+		printf \
+			'FAIL: expected .github/workflows/ci.yml named in error:\n%s\n' \
 			"$output" >&2
 		return 1
 	}
@@ -398,4 +473,104 @@ _orchestrator_guard_function_name() {
 		printf '"git show --name-only --pretty=format:" commit inspection)\n' >&2
 		return 1
 	fi
+}
+
+# ===========================================================================
+# EXTRA_COMMIT_PATHS — runtime-configurable additional allowlist entries
+# ===========================================================================
+
+@test "(8) reference allowlist: EXTRA_COMMIT_PATHS single glob allows blocked path" {
+	local repo
+	repo="$(_make_repo guard-extra-single)"
+
+	mkdir -p "$repo/config"
+	printf '{"env": "prod"}\n' > "$repo/config/app.json"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "feat: add app config"
+
+	# Without EXTRA_COMMIT_PATHS the path is rejected.
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -ne 0 ] \
+		|| fail "expected rejection without EXTRA_COMMIT_PATHS"
+
+	# With EXTRA_COMMIT_PATHS covering config/ it is accepted.
+	EXTRA_COMMIT_PATHS="config/**"
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf \
+			'FAIL: expected acceptance with EXTRA_COMMIT_PATHS=config/**, got:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(9) reference allowlist: EXTRA_COMMIT_PATHS pipe-separated patterns each work" {
+	local repo
+	repo="$(_make_repo guard-extra-multi)"
+
+	mkdir -p "$repo/config"
+	printf '{"env": "prod"}\n' > "$repo/config/app.json"
+	printf '{"name":"app","version":"1.0.0"}\n' > "$repo/package.json"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "feat: add config and package manifest"
+
+	# Both paths blocked without EXTRA_COMMIT_PATHS.
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -ne 0 ] \
+		|| fail "expected rejection without EXTRA_COMMIT_PATHS"
+
+	# Both paths allowed with pipe-separated patterns.
+	EXTRA_COMMIT_PATHS="config/**|package.json"
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf \
+			'FAIL: pipe-separated EXTRA_COMMIT_PATHS still rejected commit:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(10) reference allowlist: EXTRA_COMMIT_PATHS does not open the floodgates" {
+	local repo
+	repo="$(_make_repo guard-extra-narrow)"
+
+	mkdir -p "$repo/config" "$repo/.serena"
+	printf '{"env": "prod"}\n' > "$repo/config/app.json"
+	printf 'project_name: demo\n' > "$repo/.serena/project.yml"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "chore: config commit with accidental serena file"
+
+	# config/** allows config/app.json but NOT .serena/project.yml.
+	EXTRA_COMMIT_PATHS="config/**"
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -ne 0 ] \
+		|| fail "expected rejection: .serena/project.yml not in EXTRA_COMMIT_PATHS"
+	[[ "$output" == *".serena/project.yml"* ]] || {
+		printf \
+			'FAIL: expected .serena/project.yml named in error, got:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(11) orchestrator guard_commit_path_allowlist honours EXTRA_COMMIT_PATHS" {
+	[[ -f "$ORCHESTRATOR" ]] || fail "orchestrator script not present"
+
+	# The guard must read EXTRA_COMMIT_PATHS.
+	grep -A 50 '^guard_commit_path_allowlist()' "$ORCHESTRATOR" \
+		| grep -qF 'EXTRA_COMMIT_PATHS' || {
+		printf \
+			'FAIL: guard_commit_path_allowlist does not reference EXTRA_COMMIT_PATHS\n' \
+			>&2
+		return 1
+	}
+
+	# Must split on the pipe delimiter.
+	grep -A 50 '^guard_commit_path_allowlist()' "$ORCHESTRATOR" \
+		| grep -qF "IFS='|'" || {
+		printf \
+			'FAIL: no pipe-delimiter IFS split found in guard_commit_path_allowlist\n' \
+			>&2
+		return 1
+	}
 }
