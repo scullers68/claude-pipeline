@@ -189,6 +189,19 @@ _issue_body_extract_paths() {
 # fallback patterns of the orchestrator's _parse_task_lines).  Checked [x]
 # tasks are treated as complete and skipped.
 #
+# Only lines inside the "## Implementation Tasks" section are matched —
+# see the in-function section-extraction loop below.
+#
+# Caller audit (confirmed no dependency on whole-body parsing):
+#   assert_issue_valid() [issue-body-lib.sh:292]
+#       Passes the full issue body but consumes only the section-scoped
+#       output.  It never relied on task lines from other sections.
+#   BATS tests [implement-issue-test/test-issue-body-lib.bats]
+#       All invocations either supply a body that contains an
+#       "## Implementation Tasks" heading, or explicitly assert that
+#       section-less / out-of-section lines yield no output.  None
+#       depend on the pre-scoping, whole-body-parsing behaviour.
+#
 # Arguments:
 #   $1 - issue body text
 # Outputs:
@@ -199,12 +212,37 @@ _issue_body_parse_tasks() {
 	# Normalize gh API's backslash-escaped backticks.
 	body="${body//\\\`/\`}"
 
+	# Extract only the lines under "## Implementation Tasks", stopping at
+	# the next "##" heading (or end of body).  Lines from other sections
+	# (Acceptance Criteria, Notes, Deploy Verification, etc.) are never
+	# matched as tasks, preventing false positives from prose that happens
+	# to resemble a task line.
+	local in_section=false
+	local section=""
+	local line
+	while IFS= read -r line; do
+		if [[ "$line" == "## Implementation Tasks" ]]; then
+			in_section=true
+			continue
+		fi
+		if $in_section; then
+			# Any new level-2 heading ends the section.
+			if [[ "$line" =~ ^##([[:space:]]|$) ]]; then
+				break
+			fi
+			section+="${line}"$'\n'
+		fi
+	done <<< "$body"
+
+	# No "## Implementation Tasks" heading found — emit nothing.
+	$in_section || return 0
+
 	# Backtick-bearing regex must live in a variable — bash cannot escape a
 	# backtick inside an inline [[ =~ ]] pattern reliably.
 	local bt='`'
 	local re_bare_agent="^- (\[ \] )?${bt}([^${bt}]+)${bt} (.+)\$"
 
-	local line agent desc
+	local agent desc
 	while IFS= read -r line; do
 		[[ -z "$line" ]] && continue
 		[[ "$line" =~ \[x\] ]] && continue
@@ -242,7 +280,7 @@ _issue_body_parse_tasks() {
 		fi
 
 		printf '%s\t%s\n' "$agent" "$desc"
-	done <<< "$body"
+	done <<< "$section"
 }
 
 #

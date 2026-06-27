@@ -412,7 +412,10 @@ Some prose but no task checkboxes.
 
 @test "_issue_body_parse_tasks: parses canonical task line with checkbox" {
 	local body
-	body="- [ ] \`[bash-script-craftsman]\` **(M)** Build the lib — \`.claude/scripts/x.sh\`"
+	body=$(printf '%s\n' \
+		"## Implementation Tasks" \
+		"" \
+		"- [ ] \`[bash-script-craftsman]\` **(M)** Build the lib — \`.claude/scripts/x.sh\`")
 	run _issue_body_parse_tasks "$body"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"bash-script-craftsman"* ]]
@@ -420,14 +423,22 @@ Some prose but no task checkboxes.
 }
 
 @test "_issue_body_parse_tasks: skips completed [x] tasks" {
-	local body="- [x] \`[bash-script-craftsman]\` **(M)** Already done"
+	local body
+	body=$(printf '%s\n' \
+		"## Implementation Tasks" \
+		"" \
+		"- [x] \`[bash-script-craftsman]\` **(M)** Already done")
 	run _issue_body_parse_tasks "$body"
 	[ "$status" -eq 0 ]
 	[ -z "$output" ]
 }
 
 @test "_issue_body_parse_tasks: parses task line without checkbox bracket" {
-	local body="- \`[default]\` **(S)** Some task description"
+	local body
+	body=$(printf '%s\n' \
+		"## Implementation Tasks" \
+		"" \
+		"- \`[default]\` **(S)** Some task description")
 	run _issue_body_parse_tasks "$body"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"default"* ]]
@@ -436,7 +447,10 @@ Some prose but no task checkboxes.
 
 @test "_issue_body_parse_tasks: output is tab-separated agent<TAB>description records" {
 	local body
-	body="- [ ] \`[bash-script-craftsman]\` **(M)** Fix the handler — \`.claude/scripts/x.sh\`"
+	body=$(printf '%s\n' \
+		"## Implementation Tasks" \
+		"" \
+		"- [ ] \`[bash-script-craftsman]\` **(M)** Fix the handler — \`.claude/scripts/x.sh\`")
 	run _issue_body_parse_tasks "$body"
 	[ "$status" -eq 0 ]
 	# Record must contain a tab separating agent from description.
@@ -445,7 +459,11 @@ Some prose but no task checkboxes.
 
 @test "_issue_body_parse_tasks: parses multiple open task lines" {
 	local body
-	body="- [ ] \`[bash-script-craftsman]\` **(M)** First task"$'\n'"- [ ] \`[code-reviewer]\` **(S)** Second task"
+	body=$(printf '%s\n' \
+		"## Implementation Tasks" \
+		"" \
+		"- [ ] \`[bash-script-craftsman]\` **(M)** First task" \
+		"- [ ] \`[code-reviewer]\` **(S)** Second task")
 	run _issue_body_parse_tasks "$body"
 	[ "$status" -eq 0 ]
 	local line_count
@@ -463,4 +481,152 @@ Some prose but no task checkboxes.
 	run _issue_body_parse_tasks "This is just a description with no task lines."
 	[ "$status" -eq 0 ]
 	[ -z "$output" ]
+}
+
+# =============================================================================
+# _issue_body_parse_tasks() — SECTION SCOPING (## Implementation Tasks only)
+# =============================================================================
+
+@test "_issue_body_parse_tasks: ignores task-like lines outside ## Implementation Tasks" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Real task
+
+	## Acceptance Criteria
+
+	- [ ] `[code-reviewer]` **(S)** Should not be parsed as a task
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+	[[ "$output" != *"code-reviewer"* ]]
+}
+
+@test "_issue_body_parse_tasks: stops at next ## heading after Implementation Tasks" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** In-section task
+
+	## Notes
+
+	- [ ] `[default]` **(S)** Post-section task — must not appear
+
+	## Acceptance Criteria
+
+	- [ ] done
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
+	[ "$line_count" -eq 1 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+}
+
+@test "_issue_body_parse_tasks: returns empty when ## Implementation Tasks heading absent" {
+	local body
+	body=$(cat <<-'EOF'
+	## Some Other Section
+
+	- [ ] `[bash-script-craftsman]` **(M)** Should not be parsed
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+# =============================================================================
+# REGRESSION: inline-code bullets in Research Findings / Acceptance Criteria
+# =============================================================================
+
+@test "assert_issue_valid: validates body with inline-code bullets in Research Findings and AC" {
+	local body
+	body=$(cat <<-'EOF'
+	## Research Findings
+
+	- `parse_tasks` matched any backtick bullet before section scoping
+	- `assert_issue_valid` lacked coverage for non-task sections
+
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Fix the parser — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	- [ ] `parse_tasks` only parses lines inside Implementation Tasks
+	- [ ] `assert_issue_valid` returns 0 for this body
+	EOF
+	)
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "_issue_body_parse_tasks: inline-code bullets in Research Findings are not parsed as tasks" {
+	local body
+	body=$(cat <<-'EOF'
+	## Research Findings
+
+	- `parse_tasks` finding one
+	- `assert_issue_valid` finding two
+
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Canonical task
+
+	## Acceptance Criteria
+
+	- [ ] criteria item
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
+	[ "$line_count" -eq 1 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+}
+
+@test "_issue_body_parse_tasks: inline-code bullets in Acceptance Criteria are not parsed as tasks" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Canonical task
+
+	## Acceptance Criteria
+
+	- [ ] `[code-reviewer]` has reviewed the output
+	- [ ] `parse_tasks` returns only one record
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
+	[ "$line_count" -eq 1 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+}
+
+@test "assert_issue_valid: AC bullets beginning with agent-like inline-code spans do not affect validation" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Build — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	- [ ] `[code-reviewer]` has reviewed the output
+	- [ ] `[bash-script-craftsman]` validates cleanly
+	EOF
+	)
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
 }
