@@ -23,9 +23,10 @@
 #
 # Exit codes:
 #   0  all enabled checks passed (or gracefully skipped)
-#   1  ctx health check failed
-#   2  BATS parsing-assertion suite failed
+#   1  ctx health check failed (BATS not run or passed)
+#   2  BATS parsing-assertion suite failed (ctx passed or was skipped)
 #   3  usage / configuration error
+#   4  BOTH ctx and BATS failed; both FAIL lines are printed to stderr
 #
 
 set -uo pipefail
@@ -78,6 +79,13 @@ Environment:
     CONTEXT_MODE_ENABLED  1 = ctx must be present (exit 1 when absent).
                           0 (default) = skip ctx gracefully when not
                           installed.
+
+Exit codes:
+    0  all enabled checks passed (or gracefully skipped)
+    1  ctx health check failed (BATS not run or passed)
+    2  BATS parsing-assertion suite failed (ctx passed or was skipped)
+    3  usage / configuration error
+    4  BOTH ctx and BATS failed; both FAIL lines are printed to stderr
 EOF
 }
 
@@ -226,20 +234,25 @@ main() {
 	done
 
 	local overall_exit=0
+	local ctx_failed=false
 
 	# ctx health checks
 	if ! check_ctx; then
 		overall_exit=1
+		ctx_failed=true
 	fi
 
 	# Orchestrator parsing-assertion suite
 	if [[ "$ctx_only" == false && "$skip_bats" == false ]]; then
 		if ! check_bats "$bats_dir" "$bats_filter"; then
-			# Always record the bats failure exit code — do NOT skip when
-			# overall_exit is already 1 (ctx failure).  Masking it here would
-			# silently hide a bats failure from callers.  Both FAIL lines are
-			# still printed to stderr so the human sees the full picture.
-			overall_exit=2
+			# When ctx also failed, use exit code 4 so callers can distinguish
+			# "only BATS failed" (2) from "both checks failed" (4).  Both FAIL
+			# lines are always printed to stderr for the human reading the log.
+			if $ctx_failed; then
+				overall_exit=4
+			else
+				overall_exit=2
+			fi
 		fi
 	fi
 
