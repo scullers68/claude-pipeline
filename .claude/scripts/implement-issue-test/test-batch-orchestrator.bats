@@ -42,6 +42,41 @@ teardown() {
 }
 
 # =============================================================================
+# AC4: _extract_function_body — nested brace groups
+# =============================================================================
+# Verifies the brace-counting awk implementation captures the full function
+# body even when the function contains a nested {…} group command whose
+# closing brace appears alone on a line.  The old fragile awk range
+# `/^func()/,/^\}$/` would have stopped at the first standalone `}`,
+# silently truncating everything after it.
+
+@test "_extract_function_body returns full body with nested brace groups" {
+	# Synthesise a minimal script containing a function with an inner group
+	# command whose closing brace sits alone on a line — exactly the pattern
+	# that a naïve awk range misidentifies as the function's closing brace.
+	local script_file="$TEST_TMP/nested-braces.sh"
+	cat > "$script_file" << 'EOF'
+#!/usr/bin/env bash
+target_func() {
+	echo "outer start"
+	{
+		echo "inner block"
+	}
+	echo "outer end"
+}
+EOF
+
+	local body
+	body=$(_extract_function_body target_func "$script_file")
+
+	# Lines that appear before the nested closing brace must be present.
+	[[ "$body" == *'echo "outer start"'* ]]
+	[[ "$body" == *'echo "inner block"'* ]]
+	# Lines that appear AFTER the nested closing brace must not be truncated.
+	[[ "$body" == *'echo "outer end"'* ]]
+}
+
+# =============================================================================
 # STATIC ANALYSIS: merge_blocked case arm
 # =============================================================================
 
@@ -795,14 +830,14 @@ _simulate_dv_failed_count() {
 
 @test "validate_issue_for_processing checks for needs-explore label" {
 	local body
-	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'needs-explore'* ]]
 }
 
 @test "validate_issue_for_processing checks for missing Implementation Tasks" {
 	local body
-	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'Implementation Tasks'* ]]
 }
@@ -814,7 +849,7 @@ _simulate_dv_failed_count() {
 	# that any body carrying that section is subject to assert_issue_valid,
 	# not just bodies marked <!-- pipeline-autocreated -->.
 	local fn_body check3_block
-	fn_body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	fn_body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	check3_block=$(printf '%s\n' "$fn_body" \
 		| awk '/Check 3/,/^	fi$/' | head -15)
@@ -823,7 +858,7 @@ _simulate_dv_failed_count() {
 
 @test "Check 3 still fires for bodies with pipeline-autocreated marker" {
 	local fn_body check3_block
-	fn_body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	fn_body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	check3_block=$(printf '%s\n' "$fn_body" \
 		| awk '/Check 3/,/^	fi$/' | head -15)
@@ -834,7 +869,7 @@ _simulate_dv_failed_count() {
 
 @test "validate_issue_for_processing enriches inline when ENRICH_FOLLOWUPS is set" {
 	local body
-	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'ENRICH_FOLLOWUPS'* ]]
 	[[ "$body" == *'enrich-issue'* ]]
@@ -847,7 +882,7 @@ _simulate_dv_failed_count() {
 	# 1 — it must use || return 0 or || true so the orchestrator's own
 	# issue-validation logic remains the safety net.
 	local body
-	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'|| return 0'* ]] || [[ "$body" == *'|| true'* ]]
 }
@@ -1029,7 +1064,7 @@ source_validate_issue_for_processing() {
 	source "$lib"
 
 	local func_file="$TEST_TMP/validate_issue_for_processing.bash"
-	awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
 	grep -q 'validate_issue_for_processing' "$func_file" 2>/dev/null \
 		|| return 1
