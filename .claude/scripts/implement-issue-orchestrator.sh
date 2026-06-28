@@ -6730,10 +6730,10 @@ Log directory: \`$LOG_BASE\`"
         # Format: - [ ] `[agent-name]` Task description
         log "Parsing implementation tasks from issue body..."
         local tasks_section
-        tasks_section=$(printf '%s' "$issue_body" | awk '/^## Implementation Tasks/{found=1; next} found && /^## /{exit} found{print}')
+        tasks_section=$(printf '%s' "$issue_body" | awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} found && /^##+[[:space:]]/{exit} found{print}')
 
         if [[ -z "$tasks_section" ]]; then
-            log_error "No '## Implementation Tasks' section found in issue #$ISSUE_NUMBER"
+            log_error "No 'Implementation Tasks' section found in issue #$ISSUE_NUMBER"
             set_final_state "error"
             exit 1
         fi
@@ -6918,8 +6918,8 @@ $excerpt
         # (c) Validate ## Implementation Tasks section exists in saved issue body
         local issue_body_file="$LOG_BASE/context/issue-body.md"
         if [[ -f "$issue_body_file" ]]; then
-            if ! grep -q '^## Implementation Tasks' "$issue_body_file"; then
-                log_error "Issue body missing '## Implementation Tasks' section"
+            if ! grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file"; then
+                log_error "Issue body missing 'Implementation Tasks' section"
                 set_final_state "error"
                 exit 1
             fi
