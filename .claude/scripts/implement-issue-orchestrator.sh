@@ -2152,8 +2152,14 @@ for m in re.finditer(r'\[\s*\{', t):
             return $?
             ;;
         bail)
-            _CONSECUTIVE_TIMEOUTS=0
-            _TIMED_OUT_STAGE_NAMES=""
+            # Preserve the cascade counter on a definitive (double) timeout —
+            # it was just incremented above and must survive across stages so
+            # consecutive timeouts can be detected.  Any other error breaks the
+            # consecutive-timeout streak, so reset it.
+            if [[ "$_error_kind" != "double_timeout" ]]; then
+                _CONSECUTIVE_TIMEOUTS=0
+                _TIMED_OUT_STAGE_NAMES=""
+            fi
             _apply_stage_action "$_sr_interim" "bail" "$_da_reason"
             return $?
             ;;
@@ -2226,8 +2232,13 @@ for m in re.finditer(r'\[\s*\{', t):
                 ' 2>/dev/null)
             fi
 
-            _CONSECUTIVE_TIMEOUTS=0
-            _TIMED_OUT_STAGE_NAMES=""
+            # Preserve the cascade counter on a definitive (double) timeout so
+            # consecutive timeouts accumulate across stages; reset for any other
+            # error that breaks the consecutive-timeout streak.
+            if [[ "$_error_kind" != "double_timeout" ]]; then
+                _CONSECUTIVE_TIMEOUTS=0
+                _TIMED_OUT_STAGE_NAMES=""
+            fi
             local _sr_esc
             if [[ -n "$_esc_structured" ]]; then
                 _sr_esc=$(_emit_stage_result \
@@ -5616,9 +5627,20 @@ run_test_loop() {
         changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
         changed_files=$(printf '%s\n' "$changed_files_raw" | filter_implementation_files)
 
-        # Build BATS section for mixed scope (informational only, non-blocking)
+        # Build BATS section.
+        # bash scope (.claude/scripts changes): BLOCKING — failures fail the stage.
+        # mixed scope: informational only — failures are reported but non-blocking.
         local bats_section=""
-        if [[ "$change_scope" == "mixed" || "$change_scope" == "bash" ]]; then
+        if [[ "$change_scope" == "bash" ]]; then
+            bats_section="STEP 1c — PIPELINE BATS TESTS (BLOCKING)
+Run the pipeline BATS tests:
+cd $safe_dir && $bash_test_command
+
+BATS failures ARE a test failure — set result to 'failed' if any BATS test fails.
+Include bats_result ('passed', 'failed', or 'skipped') and bats_summary in output.
+
+"
+        elif [[ "$change_scope" == "mixed" ]]; then
             bats_section="STEP 1c — PIPELINE BATS TESTS (informational only, non-blocking)
 Run the pipeline BATS tests:
 cd $safe_dir && $bash_test_command
