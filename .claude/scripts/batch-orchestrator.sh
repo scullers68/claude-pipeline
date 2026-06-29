@@ -924,7 +924,44 @@ validate_issue_for_processing() {
 	# -----------------------------------------------------------------
 	if printf '%s' "$body" \
 		| grep -qE '<!-- pipeline-autocreated -->|## Implementation Tasks'; then
-		if ! assert_issue_valid "$body" 2>/dev/null; then
+		local valid_errs valid_rc
+		valid_errs=$(assert_issue_valid "$body" 2>&1 >/dev/null)
+		valid_rc=$?
+		if (( valid_rc != 0 )); then
+			while IFS= read -r diag_line; do
+				[[ -n "$diag_line" ]] && \
+					log_warn "Preflight #$issue_num: $diag_line"
+			done <<< "$valid_errs"
+			if [[ "$ENRICH_FOLLOWUPS" == true ]] \
+				&& printf '%s' "$body" \
+					| grep -q '<!-- pipeline-autocreated -->'; then
+				log "Preflight #$issue_num: body failed structural" \
+					"validation — enriching inline"
+				local enrich_out enrich_rc
+				enrich_out=$(dispatch_composition \
+					"/enrich-issue $issue_num" false 2>&1)
+				enrich_rc=$?
+				if (( enrich_rc != 0 )); then
+					log_warn \
+						"Preflight #$issue_num: enrich-issue" \
+						"failed (rc=$enrich_rc) — skipping"
+					[[ -n "$enrich_out" ]] && \
+						log_warn \
+							"Preflight #$issue_num:" \
+							"enrich output: $enrich_out"
+					_SKIP_REASON="body failed structural validation (enrich-issue failed)"
+					return 1
+				fi
+				if ! revalidate_issue_after_enrich "$issue_num"; then
+					log_warn \
+						"Preflight #$issue_num: enriched but" \
+						"body still invalid — skipping"
+					_SKIP_REASON="body failed structural validation (still invalid after enrich)"
+					return 1
+				fi
+				log "Preflight #$issue_num: enriched inline — proceeding"
+				return 0
+			fi
 			_SKIP_REASON="body failed structural validation"
 			return 1
 		fi
