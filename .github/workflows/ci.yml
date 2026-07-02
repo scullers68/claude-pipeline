@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feat/plugin-marketplace]
+  pull_request:
+    branches: [main]
+
+jobs:
+  fast-suites:
+    name: Platform + root suites (blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: sudo apt-get update -q && sudo apt-get install -y bats jq
+      - name: Run platform + root suites
+        run: bash tests/ci-run.sh tests/*.bats tests/platform-test/
+
+  orchestrator-suite:
+    name: Orchestrator suite (known-reds gated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: sudo apt-get update -q && sudo apt-get install -y bats jq
+      - name: Run implement-issue suite
+        run: bash tests/ci-run.sh tests/implement-issue-test/
+
+  plugin-structure:
+    name: Plugin manifest smoke check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate manifests and hook wiring
+        run: |
+          set -euo pipefail
+          jq empty .claude-plugin/marketplace.json
+          for p in plugins/*/.claude-plugin/plugin.json; do jq empty "$p"; done
+          # Every plugin listed in the marketplace must exist
+          for src in $(jq -r '.plugins[].source' .claude-plugin/marketplace.json); do
+            test -d "$src" || { echo "missing plugin dir: $src"; exit 1; }
+          done
+          # Every hook command in hooks.json must resolve to an executable file
+          for cmd in $(jq -r '.. | .command? // empty' plugins/pipeline-core/hooks/hooks.json); do
+            f="${cmd/\$\{CLAUDE_PLUGIN_ROOT\}/plugins/pipeline-core}"
+            test -x "$f" || { echo "hook script missing or not executable: $f"; exit 1; }
+          done
+          # Every skill must have valid frontmatter opener
+          for s in plugins/*/skills/*/SKILL.md; do
+            head -1 "$s" | grep -q '^---$' || { echo "bad frontmatter: $s"; exit 1; }
+          done
+          echo "plugin structure OK"
+
+  shellcheck:
+    name: Shellcheck (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -q && sudo apt-get install -y shellcheck
+      - name: Shellcheck plugin scripts
+        run: |
+          shellcheck -S warning plugins/pipeline-core/scripts/*.sh \
+            plugins/pipeline-core/scripts/platform/*.sh \
+            plugins/pipeline-core/hooks/scripts/*.sh || true
+          echo "shellcheck complete (informational)"

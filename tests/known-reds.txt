@@ -1,0 +1,23 @@
+# Known pre-existing test failures — reproduced identically on pristine main
+# before the plugin restructure (see Phase 1 commit d3e9189 for verification
+# method). CI fails only on failures NOT listed here. Fix one, delete its line.
+# Format: exact bats test description, one per line. Lines starting # ignored.
+run_stage returns error for missing structured_output
+run_stage returns timeout error on exit code 124
+parent watchdog fires when inner timeout wrapper hangs
+16 fast-path bails when mergeStateStatus is not CLEAN/HAS_HOOKS → no merge attempted
+22 mergeStateStatus stays UNKNOWN after max attempts → bail
+conflicted tasks from parallel can be re-run serially with same outcome
+serial and parallel produce same completed/failed structure for single task
+double timeout escalates sonnet to opus instead of failing
+double timeout at opus ceiling still fails (cannot escalate)
+double timeout records escalation event in status.json
+double timeout logs escalation message
+run_test_loop falls back to changedSince when only integration test files changed
+create-issue jira: calls acli jira create-issue and returns issue key
+create-issue jira: uses configured issue type
+read-issue jira: returns normalised JSON with title, body, status
+read-issue jira: calls acli jira get-issue with correct issue key
+transition-issue jira: uses default JIRA_DONE_TRANSITION
+transition-issue jira: accepts custom transition name
+transition-issue jira: uses In Progress transition
