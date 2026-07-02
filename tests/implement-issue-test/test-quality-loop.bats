@@ -429,7 +429,7 @@ teardown() {
 
 @test "quality loop is skipped for S-size tasks in implementation loop" {
     local orchestrator_src
-    orchestrator_src=$(cat "$BATS_TEST_DIRNAME/../implement-issue-orchestrator.sh" 2>/dev/null || true)
+    orchestrator_src=$(cat "$BATS_TEST_DIRNAME/../../plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" 2>/dev/null || true)
 
     # Guard must appear as a conditional wrapping run_quality_loop:
     #   if should_run_quality_loop ...; then

@@ -387,18 +387,18 @@ _real_skill_run() {
 		bash "$SKILL_VALIDATE_SCRIPT" --skill "$skill_name" 2>&1
 }
 
-@test "(e) issue-204 using-skills SKILL.md exits 0" {
-	_real_skill_run using-skills
+@test "(e) issue-204 explore SKILL.md exits 0" {
+	_real_skill_run explore
 	[ "$status" -eq 0 ]
 }
 
-@test "(e) issue-204 writing-skills SKILL.md exits 0" {
-	_real_skill_run writing-skills
+@test "(e) issue-204 implement-issue SKILL.md exits 0" {
+	_real_skill_run implement-issue
 	[ "$status" -eq 0 ]
 }
 
-@test "(e) issue-204 writing-plans SKILL.md exits 0" {
-	_real_skill_run writing-plans
+@test "(e) issue-204 process-pr SKILL.md exits 0" {
+	_real_skill_run process-pr
 	[ "$status" -eq 0 ]
 }
 
@@ -407,12 +407,12 @@ _real_skill_run() {
 	[ "$status" -eq 0 ]
 }
 
-@test "(e) issue-204 brainstorming SKILL.md exits 0" {
-	_real_skill_run brainstorming
+@test "(e) issue-204 enrich-issue SKILL.md exits 0" {
+	_real_skill_run enrich-issue
 	[ "$status" -eq 0 ]
 }
 
-@test "(e) issue-204 adapting-claude-pipeline SKILL.md exits 0" {
-	_real_skill_run adapting-claude-pipeline
+@test "(e) issue-204 handle-issues SKILL.md exits 0" {
+	_real_skill_run handle-issues
 	[ "$status" -eq 0 ]
 }

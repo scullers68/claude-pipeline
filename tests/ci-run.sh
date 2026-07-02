@@ -12,6 +12,13 @@ LOG=$(mktemp)
 bats "$@" 2>&1 | tee "$LOG"
 suite_rc=${PIPESTATUS[0]}
 
+# Guard against false greens: if bats produced no TAP plan, it crashed
+# before running anything — that is a failure, not a pass.
+if ! grep -qE '^1\.\.[0-9]+' "$LOG"; then
+    echo "CI: FATAL — bats produced no test plan (launch failure, rc=$suite_rc)." >&2
+    exit 1
+fi
+
 # Collect failure descriptions (strip "not ok N ") — portable, no mapfile
 failures=()
 while IFS= read -r line; do

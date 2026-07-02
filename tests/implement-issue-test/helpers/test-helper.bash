@@ -35,6 +35,7 @@ setup_test_env() {
     local _repo
     _repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
     export PIPELINE_AGENTS_DIRS="$_repo/plugins/pipeline-core/agents:$_repo/plugins/pipeline-frontend/agents:$_repo/plugins/pipeline-fastify/agents"
+    export PIPELINE_SKILLS_DIR="$_repo/plugins/pipeline-core/skills"
 
     # Create minimal directory structure
     mkdir -p "$TEST_TMP/logs"

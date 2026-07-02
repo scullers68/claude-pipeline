@@ -17,7 +17,7 @@ load 'helpers/test-helper.bash'
 setup() {
 	setup_test_env
 	PROJECT_DIR="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-	SKILL_FILE="$PROJECT_DIR/.claude/skills/enrich-issue/SKILL.md"
+	SKILL_FILE="$PROJECT_DIR/plugins/pipeline-core/skills/enrich-issue/SKILL.md"
 	export PROJECT_DIR SKILL_FILE
 	CLAUDE_PROJECT_DIR="$PROJECT_DIR"
 	export CLAUDE_PROJECT_DIR
@@ -117,7 +117,7 @@ teardown() {
 
 @test "handle-issues SKILL.md documents --enrich-followups flag" {
 	local skill
-	skill="$PROJECT_DIR/.claude/skills/handle-issues/SKILL.md"
+	skill="$PROJECT_DIR/plugins/pipeline-core/skills/handle-issues/SKILL.md"
 	[[ -f "$skill" ]]
 	grep -q 'enrich-followups' "$skill"
 }

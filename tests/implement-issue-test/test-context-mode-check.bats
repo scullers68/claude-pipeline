@@ -10,7 +10,7 @@
 
 setup() {
 	# BATS_TEST_DIRNAME is the real on-disk directory of this test file
-	SCRIPT_UNDER_TEST="$BATS_TEST_DIRNAME/../context-mode-check.sh"
+	SCRIPT_UNDER_TEST="$BATS_TEST_DIRNAME/../../plugins/pipeline-core/scripts/context-mode-check.sh"
 	export SCRIPT_UNDER_TEST
 
 	TEST_TMP=$(mktemp -d)
