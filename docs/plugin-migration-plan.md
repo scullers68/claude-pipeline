@@ -118,9 +118,23 @@ TEST_CMD="npm test"
 
 All plugin scripts/hooks resolve config as `$CLAUDE_PROJECT_DIR/.claude/pipeline/platform.sh`, falling back to sensible defaults. Project-specific skills/agents (the old `.claude/local/` role) live in the project's own `.claude/skills/` — Claude Code merges them natively; no overlay tooling needed.
 
-## 5. Manifests
+## 5. Does the adapt step survive?
 
-### 5.1 `.claude-plugin/marketplace.json` (repo root)
+The `adapting-claude-pipeline` workflow — updating, pruning, and rewriting skills per project context — is the pipeline's most distinctive feature, so it's the natural first objection to a read-only plugin model. It survives, but changes shape: **adaptation stops being "edit the shared copy" and becomes "generate the project layer".** Broken into its four actual operations:
+
+**Pruning irrelevant skills → mostly unnecessary.** Coarse-grained pruning becomes plugin selection: a CLI project never installs `pipeline-frontend` (the files currently marked `STACK-SPECIFIC: delete during adaptation` are precisely the frontend pack). Fine-grained pruning loses its economic rationale: plugin skills are lazy-loaded at ~100 tokens of metadata each until invoked, so an unused skill is no longer clutter worth a deletion pass.
+
+**Tuning conventions and patterns → already survives, unchanged.** The orchestrator *already* injects `config/context.md` into every agent prompt via `PLATFORM_CONTEXT_FILE`, and seven skills read the config layer — the parameterization mechanism exists today. In the plugin model that file moves to `.claude/pipeline/context.md` in the consumer repo, **committed**. That is strictly better than the current arrangement, where adaptations live gitignored in `local/` and the docs warn that `sync.sh` overwrites `platform.sh`.
+
+**Customising stack agents → survives via the native project layer.** Today: copy `fastify-backend-developer.md` into `.claude/local/agents/` and edit. Plugin model: the consumer repo's own `.claude/agents/` does this natively, no overlay script. Stack-pack agents become starting points that get copied project-side when a project needs to diverge. Upstream commits #567 (strip stack-specific comments from local agent copies) and #569 (sync agent definitions to consumer repos) are already implementing this manually — customised agents belong in the consumer repo.
+
+**Deep rewrites of a core skill's body → the one genuine loss.** A project that needs a fundamentally different `implement-issue` flow cannot edit the plugin's copy. Mitigations in order of preference: make the core skill branch on config (usually sufficient); define a project-level skill that takes over (Phase 3 must verify how same-name project skills interact with namespaced plugin skills — flagged in §8); or pin/fork the plugin for that project. In practice this case is rare: observed adaptations across nine consumer projects were pruning and agent tuning, not core-flow rewrites.
+
+Net: `adapting-claude-pipeline` becomes `pipeline-setup` — same interviewing intelligence, different output target. Instead of mutating a copied tree, it generates `platform.sh`, `context.md`, and any project-side agent overrides. Adaptation products finally live in git, in the project, where an upstream update can never clobber them.
+
+## 6. Manifests
+
+### 6.1 `.claude-plugin/marketplace.json` (repo root)
 
 ```json
 {
@@ -153,7 +167,7 @@ All plugin scripts/hooks resolve config as `$CLAUDE_PROJECT_DIR/.claude/pipeline
 }
 ```
 
-### 5.2 `plugins/pipeline-core/.claude-plugin/plugin.json`
+### 6.2 `plugins/pipeline-core/.claude-plugin/plugin.json`
 
 ```json
 {
@@ -166,7 +180,7 @@ All plugin scripts/hooks resolve config as `$CLAUDE_PROJECT_DIR/.claude/pipeline
 }
 ```
 
-### 5.3 `plugins/pipeline-core/hooks/hooks.json`
+### 6.3 `plugins/pipeline-core/hooks/hooks.json`
 
 ```json
 {
@@ -194,7 +208,7 @@ All plugin scripts/hooks resolve config as `$CLAUDE_PROJECT_DIR/.claude/pipeline
 }
 ```
 
-### 5.4 Plugin directory layout (core)
+### 6.4 Plugin directory layout (core)
 
 ```
 plugins/pipeline-core/
@@ -217,7 +231,7 @@ plugins/pipeline-core/
 └── prompts/review-checklist.md
 ```
 
-## 6. Migration phases
+## 7. Migration phases
 
 **Phase 0 — Fork & baseline** (½ day)
 Fork to `russellgrocott/claude-pipeline` (or branch on Steve's). Tag current state `v1-final`. Get bats suites green as the regression baseline.
@@ -240,18 +254,19 @@ GitHub Action: bats suites + shellcheck + a smoke test that installs the marketp
 **Phase 6 (later, optional) — Orchestrator on the Agent SDK**
 `implement-issue-orchestrator.sh` is 6,047 lines of bash implementing a state machine (JSON parsing, retries, rate limits, timeout escalation, review loops). It works and is tested — ship it as-is in v2.0. But its replacement is a TypeScript Agent SDK program (or Claude Code workflow script): real data structures, native subagent management, and the retry/rate-limit machinery for free. The issue-format conventions and test fixtures all carry over. Do this only when the next substantial orchestrator feature is needed — not as part of this migration.
 
-## 7. Risks & mitigations
+## 8. Risks & mitigations
 
 | Risk | Mitigation |
 |---|---|
 | Skill name changes (`explore` → `pipeline-core:explore`) break muscle memory / cross-references | Grep all SKILL.md + orchestrator prompts for skill invocations in Phase 1; short names still resolve when unambiguous |
 | Orchestrator hardcodes `.claude/scripts/` paths | Central `PIPELINE_ROOT` variable resolved from `${CLAUDE_PLUGIN_ROOT}`, single change point |
 | Consumers with `.claude/local/` customisations | They migrate to project-level `.claude/skills/` (native merge); document in CHANGELOG |
+| Unverified: can a same-name project skill cleanly take over from a namespaced plugin skill? (§5, deep-rewrite case) | Explicit test in Phase 3 pilot; fallback is config-driven branching in the core skill or a pinned plugin version |
 | Superpowers forks contain real divergence | Phase 2 diff audit; anything worth keeping becomes a documented patch or a `pipeline-methodology` plugin |
 | Headless/CI use (`claude -p` from orchestrator) | Plugins load in headless mode; verify explicitly in Phase 3 pilot |
 | Upstream (`aaddrick`) sync story | The marketplace repo still tracks upstream via git; syncs now land in ONE place instead of N projects |
 
-## 8. Why this is worth it (summary for Steve)
+## 9. Why this is worth it (summary for Steve)
 
 - **Distribution**: `cp -r` + 6-step adaptation + overlay scripts → one `/plugin install`. Updates propagate by `git push`.
 - **Reliability**: kills the partial-copy failure class outright (nine differently-broken hook copies found in Russell's projects this week).
