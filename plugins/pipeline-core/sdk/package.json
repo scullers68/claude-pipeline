@@ -5,10 +5,12 @@
   "description": "Agent SDK harness for stage supervision (side-by-side with the bash orchestrator)",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "ajv": "^8.17.1",
     "typescript": "^5.5.4"
   }
 }
