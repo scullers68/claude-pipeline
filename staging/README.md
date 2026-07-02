@@ -4,14 +4,14 @@ Nothing in this directory ships in any plugin. It exists so the Phase 1
 restructure stays purely mechanical; each subdirectory has a pending Phase 2
 decision (see `docs/plugin-migration-plan.md`).
 
-## superpowers-forks/
+## superpowers-forks/ — RESOLVED (deleted 2026-07-02)
 
-Eleven methodology skills forked from the superpowers ecosystem
-(brainstorming, TDD, systematic-debugging, writing-*, using-*, etc.).
-`pipeline-core` now assumes the superpowers plugin is installed instead of
-vendoring these. **Phase 2:** diff each fork against upstream superpowers;
-delete forks with no meaningful divergence, promote anything worth keeping
-into a documented patch or a `pipeline-methodology` plugin.
+Audit verdict (fork issue #1): 10 of 11 forks were upstream superpowers
+skills plus pipeline plumbing. Deleted. Extracted before deletion:
+`writing-agents` (no upstream counterpart) promoted into pipeline-core
+skills; subagent reviewer prompts moved to
+`plugins/pipeline-core/prompts/subagent-review/`; remaining deltas
+captured in `docs/pipeline-conventions.md`.
 
 ## retired/
 
