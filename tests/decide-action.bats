@@ -26,8 +26,8 @@ bats_require_minimum_version 1.5.0
 
 # Resolve repo-root paths once at load time so tests are CWD-independent.
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-DECIDE_ACTION_SCRIPT="$REPO_ROOT/.claude/scripts/decide-action.sh"
-ORCHESTRATOR_SCRIPT="$REPO_ROOT/.claude/scripts/implement-issue-orchestrator.sh"
+DECIDE_ACTION_SCRIPT="$REPO_ROOT/plugins/pipeline-core/scripts/decide-action.sh"
+ORCHESTRATOR_SCRIPT="$REPO_ROOT/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown

@@ -1,0 +1,8 @@
+{
+  "name": "pipeline-core",
+  "version": "2.0.0-alpha.1",
+  "description": "Issue-driven pipeline: /explore writes the plan into an issue with a parseable task list; /implement-issue reads it back, implements task-by-task with subagents, tests, reviews, and opens the PR/MR. Platform scripts support GitHub, GitLab, and Jira.",
+  "author": { "name": "Steve Grocott" },
+  "homepage": "https://github.com/stevegrocott/claude-pipeline",
+  "keywords": ["workflow", "issues", "jira", "gitlab", "github", "orchestration"]
+}

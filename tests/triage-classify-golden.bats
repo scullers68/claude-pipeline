@@ -29,10 +29,10 @@ bats_require_minimum_version 1.5.0
 
 # Resolve paths once at load time so tests are CWD-independent.
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-LIB_FILE="$REPO_ROOT/.claude/scripts/skill-golden-lib.sh"
-PROMPT_FILE="$REPO_ROOT/.claude/scripts/prompts/triage-prompt.sh"
-FIXTURE_DIR="$REPO_ROOT/.claude/scripts/implement-issue-test/fixtures/triage"
-SCHEMA_FILE="$REPO_ROOT/.claude/scripts/schemas/implement-issue-triage.json"
+LIB_FILE="$REPO_ROOT/plugins/pipeline-core/scripts/skill-golden-lib.sh"
+PROMPT_FILE="$REPO_ROOT/plugins/pipeline-core/scripts/prompts/triage-prompt.sh"
+FIXTURE_DIR="$REPO_ROOT/tests/implement-issue-test/fixtures/triage"
+SCHEMA_FILE="$REPO_ROOT/plugins/pipeline-core/scripts/schemas/implement-issue-triage.json"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown

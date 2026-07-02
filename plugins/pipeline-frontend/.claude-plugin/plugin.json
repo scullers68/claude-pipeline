@@ -1,0 +1,8 @@
+{
+  "name": "pipeline-frontend",
+  "version": "2.0.0-alpha.1",
+  "description": "Web stack pack for the claude-pipeline: UI design fundamentals, bulletproof frontend patterns, UI review, Playwright testing, plus React and Playwright developer agents.",
+  "author": { "name": "Steve Grocott" },
+  "homepage": "https://github.com/stevegrocott/claude-pipeline",
+  "keywords": ["frontend", "react", "playwright", "ui"]
+}

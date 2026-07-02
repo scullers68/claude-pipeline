@@ -22,7 +22,7 @@ bats_require_minimum_version 1.5.0
 
 # Resolve paths once at load time so tests are CWD-independent.
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-DECIDE_ACTION_SCRIPT="$REPO_ROOT/.claude/scripts/decide-action.sh"
+DECIDE_ACTION_SCRIPT="$REPO_ROOT/plugins/pipeline-core/scripts/decide-action.sh"
 FIXTURES_DIR="$REPO_ROOT/tests/fixtures/escalation-policy"
 
 # ---------------------------------------------------------------------------

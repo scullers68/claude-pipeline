@@ -11,7 +11,7 @@
 # forces all issue creation through create-followup-issue.sh /
 # platform/create-issue.sh, which run assert_issue_valid fail-closed.
 
-HOOK="${BATS_TEST_DIRNAME}/../.claude/hooks/block-gh-issue-create.sh"
+HOOK="${BATS_TEST_DIRNAME}/../plugins/pipeline-core/hooks/scripts/block-gh-issue-create.sh"
 
 # Run the hook with a given Bash command as the PreToolUse payload.
 # Sets $status (0 = allow, 2 = block).

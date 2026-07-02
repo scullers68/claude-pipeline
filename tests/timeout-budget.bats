@@ -27,7 +27,7 @@
 bats_require_minimum_version 1.5.0
 
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-ORCHESTRATOR="$REPO_ROOT/.claude/scripts/implement-issue-orchestrator.sh"
+ORCHESTRATOR="$REPO_ROOT/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown

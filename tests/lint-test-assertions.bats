@@ -37,7 +37,7 @@
 bats_require_minimum_version 1.5.0
 
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-LINTER="$REPO_ROOT/.claude/scripts/lint-test-assertions.sh"
+LINTER="$REPO_ROOT/plugins/pipeline-core/scripts/lint-test-assertions.sh"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown

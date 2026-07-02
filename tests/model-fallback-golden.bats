@@ -22,7 +22,7 @@ bats_require_minimum_version 1.5.0
 
 # Resolve paths once at load time so tests are CWD-independent.
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-DECIDE_FALLBACK_SCRIPT="$REPO_ROOT/.claude/scripts/decide-model-fallback.sh"
+DECIDE_FALLBACK_SCRIPT="$REPO_ROOT/plugins/pipeline-core/scripts/decide-model-fallback.sh"
 FIXTURES_DIR="$REPO_ROOT/tests/fixtures/model-fallback"
 
 # ---------------------------------------------------------------------------

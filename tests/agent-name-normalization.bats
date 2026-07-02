@@ -19,8 +19,9 @@
 bats_require_minimum_version 1.5.0
 
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-ORCHESTRATOR="$REPO_ROOT/.claude/scripts/implement-issue-orchestrator.sh"
-AGENTS_DIR="$REPO_ROOT/.claude/agents"
+ORCHESTRATOR="$REPO_ROOT/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
+CORE_AGENTS_DIR="$REPO_ROOT/plugins/pipeline-core/agents"
+FRONTEND_AGENTS_DIR="$REPO_ROOT/plugins/pipeline-frontend/agents"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown
@@ -32,8 +33,10 @@ setup() {
 
 	# _normalize_agent_name resolves "${SCRIPT_DIR}/../agents/<name>.md", so
 	# SCRIPT_DIR must point at the real scripts directory.
-	export SCRIPT_DIR="$REPO_ROOT/.claude/scripts"
+	export SCRIPT_DIR="$REPO_ROOT/plugins/pipeline-core/scripts"
 	export SCRIPT_NAME="agent-name-normalization-test"
+	# Simulate core + frontend packs both installed.
+	export PIPELINE_AGENTS_DIRS="$CORE_AGENTS_DIR:$FRONTEND_AGENTS_DIR"
 
 	# Empty LOG_FILE → log/log_warn write only to stderr (no file needed).
 	export LOG_FILE=""
@@ -59,10 +62,13 @@ _source_orchestrator_functions() {
 		/^log\(\) \{$/,/^\}$/                    { print; next }
 		/^log_warn\(\) \{$/,/^\}$/               { print; next }
 		/^_normalize_agent_name\(\) \{$/,/^\}$/  { print; next }
+		/^_agent_defined\(\) \{$/,/^\}$/  { print; next }
 		/^_parse_task_lines\(\) \{$/,/^\}$/      { print; next }
 	' "$ORCHESTRATOR" > "$func_file"
 	# shellcheck disable=SC1090
 	source "$func_file"
+	# readonly lines are skipped above; re-supply the fallback sentinel.
+	_AGENT_SENTINEL_DEFAULT="${_AGENT_SENTINEL_DEFAULT:-default}"
 }
 
 # Parse a single task line and echo the agent recorded for task 1.
@@ -77,7 +83,7 @@ _agent_of_first_task() {
 
 @test "(1) _normalize_agent_name maps legacy 'test-engineer' to 'playwright-test-developer'" {
 	[[ -f "$ORCHESTRATOR" ]] || fail "orchestrator script not present"
-	[[ -f "$AGENTS_DIR/playwright-test-developer.md" ]] \
+	[[ -f "$FRONTEND_AGENTS_DIR/playwright-test-developer.md" ]] \
 		|| fail "fixture precondition: playwright-test-developer.md must exist"
 
 	_source_orchestrator_functions
@@ -91,7 +97,7 @@ _agent_of_first_task() {
 }
 
 @test "(2) _normalize_agent_name leaves a known local agent unchanged" {
-	[[ -f "$AGENTS_DIR/bash-script-craftsman.md" ]] \
+	[[ -f "$CORE_AGENTS_DIR/bash-script-craftsman.md" ]] \
 		|| fail "fixture precondition: bash-script-craftsman.md must exist"
 
 	_source_orchestrator_functions

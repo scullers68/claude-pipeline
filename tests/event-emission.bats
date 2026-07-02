@@ -21,8 +21,8 @@
 bats_require_minimum_version 1.5.0
 
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-ORCHESTRATOR="$REPO_ROOT/.claude/scripts/implement-issue-orchestrator.sh"
-EVENT_EMIT="$REPO_ROOT/.claude/scripts/event-emit.sh"
+ORCHESTRATOR="$REPO_ROOT/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
+EVENT_EMIT="$REPO_ROOT/plugins/pipeline-core/scripts/event-emit.sh"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown
@@ -43,7 +43,7 @@ setup() {
 
 	# SCRIPT_DIR must point at the scripts directory so emit_event can locate
 	# event-emit.sh; SCRIPT_NAME is used only in log messages.
-	export SCRIPT_DIR="$REPO_ROOT/.claude/scripts"
+	export SCRIPT_DIR="$REPO_ROOT/plugins/pipeline-core/scripts"
 	export SCRIPT_NAME="event-emission-test"
 
 	# LOG_FILE empty → log_error writes only to stderr (no file needed).

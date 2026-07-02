@@ -45,7 +45,7 @@
 bats_require_minimum_version 1.5.0
 
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-SCRIPT_UNDER_TEST="$REPO_ROOT/.claude/scripts/context-mode-check.sh"
+SCRIPT_UNDER_TEST="$REPO_ROOT/plugins/pipeline-core/scripts/context-mode-check.sh"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown

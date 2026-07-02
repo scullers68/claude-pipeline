@@ -16,7 +16,7 @@
 bats_require_minimum_version 1.5.0
 
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-AGENTS_DIR="$REPO_ROOT/.claude/agents"
+AGENTS_DIR="$REPO_ROOT/plugins"
 
 # =============================================================================
 # FRONT-MATTER OPENER
@@ -27,7 +27,7 @@ AGENTS_DIR="$REPO_ROOT/.claude/agents"
 	local first_non_empty
 	local -a failures=()
 
-	for file in "$AGENTS_DIR"/*.md; do
+	for file in "$AGENTS_DIR"/*/agents/*.md; do
 		[[ -f "$file" ]] || continue
 		first_non_empty=$(grep -m1 . "$file")
 		if [[ "$first_non_empty" != "---" ]]; then
@@ -51,7 +51,7 @@ AGENTS_DIR="$REPO_ROOT/.claude/agents"
 @test ".claude/agents/ directory contains at least one .md file" {
 	local -a found=()
 
-	for file in "$AGENTS_DIR"/*.md; do
+	for file in "$AGENTS_DIR"/*/agents/*.md; do
 		[[ -f "$file" ]] && found+=("$file")
 	done
 
