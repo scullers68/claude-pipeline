@@ -1,0 +1,14 @@
+{
+  "name": "@pipeline-core/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent SDK harness for stage supervision (side-by-side with the bash orchestrator)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4"
+  }
+}
