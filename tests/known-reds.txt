@@ -21,3 +21,8 @@ read-issue jira: calls acli jira get-issue with correct issue key
 transition-issue jira: uses default JIRA_DONE_TRANSITION
 transition-issue jira: accepts custom transition name
 transition-issue jira: uses In Progress transition
+(2a) get_stage_timeout test-iter returns 900
+(5b) default MAX_ORCHESTRATOR_WALL_TIME >= calc_orchestrator_wall_time()
+(5d) calc_orchestrator_wall_time default value is 11040
+# CI-environment only — passes locally on main and branch:
+(k) bats not in PATH → exit 2

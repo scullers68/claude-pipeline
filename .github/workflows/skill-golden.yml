@@ -145,7 +145,7 @@ jobs:
         run: |
           printf 'ANTHROPIC_API_KEY absent — live-API tests skipped\n'
           mapfile -t bats_files < <(find tests -maxdepth 1 -name '*.bats' ! -name '*-live.bats' | sort)
-          bats "${bats_files[@]}"
+          bash tests/ci-run.sh "${bats_files[@]}"
 
       - name: No decision scripts touched — bats tests skipped
         if: steps.scope.outputs.run == 'false'
