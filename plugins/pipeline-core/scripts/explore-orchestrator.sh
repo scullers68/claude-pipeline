@@ -113,15 +113,17 @@ update_status() {
 # Returns empty string if skill file not found (non-fatal).
 load_skill() {
     local skill_name="$1"
-    # CLAUDE_PROJECT_DIR is set by Claude Code but absent when run from batch/shell directly.
-    # Fall back to the script's own repo root so skills load correctly in both contexts.
-    # Resolution order: explicit override, plugin layout (skills alongside
-    # scripts/ inside pipeline-core), then consumer project skills.
-    local _plugin_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    local skill_file="${PIPELINE_SKILLS_DIR:-$_plugin_root/skills}/$skill_name/SKILL.md"
-    # Consumer projects may override/extend with their own .claude/skills.
-    if [[ ! -f "$skill_file" && -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
-        skill_file="$CLAUDE_PROJECT_DIR/.claude/skills/$skill_name/SKILL.md"
+    # Same resolution order as implement-issue-orchestrator load_skill:
+    # PIPELINE_SKILLS_DIR > project override > CLAUDE_PLUGIN_ROOT > derived.
+    local skill_file=""
+    [[ -n "${PIPELINE_SKILLS_DIR:-}" ]] && skill_file="$PIPELINE_SKILLS_DIR/$skill_name/SKILL.md"
+    if [[ -z "$skill_file" || ! -f "$skill_file" ]] && [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+        local _proj="$CLAUDE_PROJECT_DIR/.claude/skills/$skill_name/SKILL.md"
+        [[ -f "$_proj" ]] && skill_file="$_proj"
+    fi
+    if [[ -z "$skill_file" || ! -f "$skill_file" ]]; then
+        local _plugin_root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+        skill_file="$_plugin_root/skills/$skill_name/SKILL.md"
     fi
     if [[ -f "$skill_file" ]]; then
         cat "$skill_file"
