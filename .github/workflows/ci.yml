@@ -19,15 +19,40 @@ jobs:
         run: bash tests/ci-run.sh tests/*.bats tests/platform-test/
 
   orchestrator-suite:
-    name: Orchestrator suite (known-reds gated)
+    name: Orchestrator suite, fast files (known-reds gated)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install bats
         run: sudo apt-get update -q && sudo apt-get install -y bats jq
-      - name: Run implement-issue suite
-        run: bash tests/ci-run.sh tests/implement-issue-test/
+      - name: Run implement-issue suite (excluding timer-heavy files)
+        run: |
+          mapfile -t files < <(find tests/implement-issue-test -maxdepth 1 -name 'test-*.bats' \
+            ! -name 'test-stage-runner.bats' ! -name 'test-timeout-escalation.bats' \
+            ! -name 'test-merge-pr-timeouts.bats' ! -name 'test-rate-limit.bats' \
+            ! -name 'test-merge-block-convergence.bats' ! -name 'test-soft-fail-convergence.bats' \
+            ! -name 'test-integration.bats' | sort)
+          bash tests/ci-run.sh "${files[@]}"
+
+  orchestrator-timers:
+    name: Orchestrator suite, timer-heavy files (known-reds gated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: sudo apt-get update -q && sudo apt-get install -y bats jq
+      - name: Run timer-heavy files (real-clock watchdog/retry/rate-limit tests)
+        run: |
+          bash tests/ci-run.sh \
+            tests/implement-issue-test/test-stage-runner.bats \
+            tests/implement-issue-test/test-timeout-escalation.bats \
+            tests/implement-issue-test/test-merge-pr-timeouts.bats \
+            tests/implement-issue-test/test-rate-limit.bats \
+            tests/implement-issue-test/test-merge-block-convergence.bats \
+            tests/implement-issue-test/test-soft-fail-convergence.bats \
+            tests/implement-issue-test/test-integration.bats
 
   plugin-structure:
     name: Plugin manifest smoke check
