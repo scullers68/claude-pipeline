@@ -138,3 +138,8 @@ MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
 MAX_E2E_FIX_ITERATIONS="${MAX_E2E_FIX_ITERATIONS:-2}"
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-10800}" # seconds (default 3 hours — long-running issues with many tasks or slow test suites can easily exceed 1 hour)
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-900}"        # seconds per parallel task (default 15 min)
+
+# SDK harness work (issue #11): the new component adds a TypeScript package —
+# allow its tree (incl. package.json/tsconfig/.gitignore/lockfile) through the
+# commit-path guard.
+EXTRA_COMMIT_PATHS="${EXTRA_COMMIT_PATHS:-plugins/pipeline-core/sdk/*}"
