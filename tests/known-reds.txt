@@ -26,3 +26,23 @@ transition-issue jira: uses In Progress transition
 (5d) calc_orchestrator_wall_time default value is 11040
 # CI-environment only — passes locally on main and branch:
 (k) bats not in PATH → exit 2
+# Linux/CI-runner only — fail identically on pristine main (ci-baseline-main
+# run 28598471318); first-ever Linux exposure of these suites:
+02 fetch_usage uses cache within TTL — second call doesn't curl again
+03 fetch_usage re-curls when cache is older than TTL
+52 cache-was-valid then fetch fails → ERROR log (regression detected)
+fix-agent dispatched when failures are from PR-changed test files in explicit mode
+fix-agent not dispatched when all failures are pre-existing in fallback mode
+run_test_loop does not include BATS in main test_command for mixed scope
+run_test_loop excludes integration test files from explicit jest list
+run_test_loop excludes Playwright specs from Jest command
+run_test_loop exits gracefully when fallback mode returns failed with empty failures array
+run_test_loop filters .claude/ files from validation scope
+run_test_loop handles mixed scope with explicit test files
+run_test_loop includes E2E section in prompt for ts-frontend scope
+run_test_loop logs Playwright specs as excluded from Jest
+run_test_loop omits E2E section for typescript scope
+run_test_loop omits E2E section when TEST_E2E_CMD is empty
+run_test_loop passes complexity arg to fix-tests run_stage call
+run_test_loop passes explicit test files to jest when test files changed
+run_test_loop uses changedSince fallback when only impl files changed

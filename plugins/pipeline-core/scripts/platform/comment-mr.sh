@@ -9,6 +9,9 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/.claude/config/
     PLATFORM_CONFIG="$CLAUDE_PROJECT_DIR/.claude/config/platform.sh"
 elif [ -f "$SCRIPT_DIR/../../config/platform.sh" ]; then
     PLATFORM_CONFIG="$SCRIPT_DIR/../../config/platform.sh"
+elif [ -f "$SCRIPT_DIR/../../../../.claude/config/platform.sh" ]; then
+    # Plugin living inside a checked-out repo (dogfood/CI): repo-level config.
+    PLATFORM_CONFIG="$SCRIPT_DIR/../../../../.claude/config/platform.sh"
 else
     PLATFORM_CONFIG="$PWD/.claude/config/platform.sh"
 fi
