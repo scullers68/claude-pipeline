@@ -45,18 +45,18 @@ jobs:
   orchestrator-timers:
     name: Timer file ${{ matrix.file }} (known-reds gated)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.budget }}
     strategy:
       fail-fast: false
       matrix:
-        file:
-          - test-stage-runner
-          - test-timeout-escalation
-          - test-merge-pr-timeouts
-          - test-rate-limit
-          - test-merge-block-convergence
-          - test-soft-fail-convergence
-          - test-integration
+        include:
+          - { file: test-stage-runner, budget: 300 }
+          - { file: test-timeout-escalation, budget: 90 }
+          - { file: test-merge-pr-timeouts, budget: 90 }
+          - { file: test-rate-limit, budget: 90 }
+          - { file: test-merge-block-convergence, budget: 90 }
+          - { file: test-soft-fail-convergence, budget: 90 }
+          - { file: test-integration, budget: 90 }
     steps:
       - uses: actions/checkout@v4
       - name: Install bats
