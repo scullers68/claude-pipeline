@@ -50,3 +50,8 @@ run_test_loop uses changedSince fallback when only impl files changed
 # vs helper's full model-config source; never previously run on any platform):
 PR stage tier is standard (not light)
 PR stage resolves to sonnet
+# Order-dependent on pristine main (red in isolation on both platforms,
+# intermittently green in full-file runs — depends on prior-test state):
+empty output escalates to next model instead of failing
+empty output records escalation with reason 'no_structured_output'
+empty output escalation uses .result fallback when no structured_output
