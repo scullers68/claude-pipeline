@@ -47,7 +47,10 @@ readonly IDEMPOTENT_WINDOW=60
 
 # Schema file — used for jq validation before append
 if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
-	SCHEMA_FILE="${CLAUDE_PROJECT_DIR}/$SCRIPT_DIR/schemas/pipeline-feedback.json"
+	# Project/sandbox override first (legacy .claude/scripts layout), else the
+	# schema shipped alongside this script in the plugin.
+	SCHEMA_FILE="${CLAUDE_PROJECT_DIR:-}/.claude/scripts/schemas/pipeline-feedback.json"
+	[ -f "$SCHEMA_FILE" ] || SCHEMA_FILE="$SCRIPT_DIR/schemas/pipeline-feedback.json"
 else
 	SCHEMA_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/schemas/pipeline-feedback.json"
 fi

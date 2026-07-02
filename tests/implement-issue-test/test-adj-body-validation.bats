@@ -271,7 +271,8 @@ teardown() {
 	mock_root="$TEST_TMP/mock_root"
 	mkdir -p "$mock_root/scripts" "$mock_root/agents"
 	SCRIPT_DIR="$mock_root/scripts"
-	run --separate-stderr _infer_agent_from_path "scripts/deploy.sh"
+	PIPELINE_AGENTS_DIRS="$mock_root/agents" \
+		run --separate-stderr _infer_agent_from_path "scripts/deploy.sh"
 	SCRIPT_DIR="${TEST_DIR}/.."
 	[ "$status" -eq 0 ] || return 1
 	[ "$output" = "default" ]
@@ -326,7 +327,7 @@ teardown() {
 # =============================================================================
 
 # Stable reference to the body generator regardless of SCRIPT_DIR changes.
-_FOLLOWUP_GENERATOR="${TEST_DIR}/../create-followup-issue.sh"
+_FOLLOWUP_GENERATOR="${BATS_TEST_DIRNAME}/../../plugins/pipeline-core/scripts/create-followup-issue.sh"
 
 # _golden_sandbox_setup — initialises the agents/repo sandbox and sources the
 # two validation libraries.  Deliberately uses different sandbox paths
@@ -342,10 +343,10 @@ _golden_sandbox_setup() {
 	mkdir -p "${ISSUE_BODY_REPO_ROOT}/.claude/scripts"
 
 	# Source libraries; their idempotency guards make repeated sourcing safe.
-	# shellcheck source=../skill-golden-lib.sh
-	source "${TEST_DIR}/../skill-golden-lib.sh"
-	# shellcheck source=../issue-body-lib.sh
-	source "${TEST_DIR}/../issue-body-lib.sh"
+	# shellcheck source=../../plugins/pipeline-core/scripts/skill-golden-lib.sh
+	source "${BATS_TEST_DIRNAME}/../../plugins/pipeline-core/scripts/skill-golden-lib.sh"
+	# shellcheck source=../../plugins/pipeline-core/scripts/issue-body-lib.sh
+	source "${BATS_TEST_DIRNAME}/../../plugins/pipeline-core/scripts/issue-body-lib.sh"
 
 	unset DEPLOY_VERIFY_CMD
 	unset FRONTEND_PATH_PATTERNS

@@ -29,6 +29,13 @@ setup_test_env() {
     TEST_TMP=$(mktemp -d)
     export TEST_TMP
 
+    # Extracted-function sourcing clobbers SCRIPT_DIR to TEST_TMP, breaking
+    # the default plugin-relative agent search. Pin the search dirs
+    # explicitly (simulates core + both stack packs installed).
+    local _repo
+    _repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+    export PIPELINE_AGENTS_DIRS="$_repo/plugins/pipeline-core/agents:$_repo/plugins/pipeline-frontend/agents:$_repo/plugins/pipeline-fastify/agents"
+
     # Create minimal directory structure
     mkdir -p "$TEST_TMP/logs"
     mkdir -p "$TEST_TMP/schemas"
