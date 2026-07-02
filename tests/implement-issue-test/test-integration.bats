@@ -1057,7 +1057,9 @@ teardown() {
     local script_content
     script_content=$(cat "$ORCHESTRATOR_SCRIPT")
 
-    [[ "$script_content" == *'source "$SCRIPT_DIR/../config/platform.sh"'* ]]
+    # Resolver selects the config path (project > script-relative > repo > cwd);
+    # the invariant is that the resolved config is sourced.
+    [[ "$script_content" == *'source "$PLATFORM_CONFIG"'* ]]
 }
 
 @test "orchestrator sets PLATFORM_DIR" {

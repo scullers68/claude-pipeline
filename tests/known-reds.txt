@@ -46,3 +46,7 @@ run_test_loop omits E2E section when TEST_E2E_CMD is empty
 run_test_loop passes complexity arg to fix-tests run_stage call
 run_test_loop passes explicit test files to jest when test files changed
 run_test_loop uses changedSince fallback when only impl files changed
+# Pre-existing on pristine main (readonly collision: arrays-file extraction
+# vs helper's full model-config source; never previously run on any platform):
+PR stage tier is standard (not light)
+PR stage resolves to sonnet

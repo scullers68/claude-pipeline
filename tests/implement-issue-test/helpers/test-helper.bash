@@ -387,6 +387,13 @@ source_orchestrator_functions() {
 # Extracted functions for testing - DO NOT RUN DIRECTLY
 HEADER
 
+    # The orchestrator sources platform config via a multi-line resolver that
+    # the awk extraction below cannot carry. Source the repo config here so
+    # extracted contexts see the same platform values as real startup.
+    local _cfg
+    _cfg="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/.claude/config/platform.sh"
+    printf 'source %q\n' "$_cfg" >> "$func_file"
+
     # Use awk to extract only function definitions, constants, and config vars
     # This skips argument parsing and immediate execution code
     awk '
