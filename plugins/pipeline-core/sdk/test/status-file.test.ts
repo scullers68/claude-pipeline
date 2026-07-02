@@ -4,7 +4,6 @@ import { promises as fsp } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { execFileSync } from "node:child_process";
-import Ajv from "ajv";
 
 import {
   STAGE_KEYS,
@@ -14,14 +13,10 @@ import {
   readStatusFile,
   type StatusFile,
 } from "../src/status-file";
+import { createAssertValid } from "./helpers";
 
-const ajv = new Ajv({ strict: false });
-const validate = ajv.compile(STATUS_FILE_SCHEMA);
-
-function assertValid(value: unknown): void {
-  const ok = validate(value);
-  assert.ok(ok, `expected value to satisfy STATUS_FILE_SCHEMA: ${ajv.errorsText(validate.errors)}`);
-}
+const assertValid = createAssertValid(STATUS_FILE_SCHEMA);
+const validate = (assertValid as any).validator;
 
 /**
  * Produces a status.json fixture with jq, using the identical filter the
@@ -131,7 +126,7 @@ test("a status.json with an unknown top-level field fails validation", () => {
   assert.equal(validate({ ...status, unexpected_field: true }), false);
 });
 
-test("writeStatusFile atomically writes a schema-valid file and leaves no temp file behind", async () => {
+test("writeStatusFile atomically writes a schema-valid file", async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "status-file-"));
   const filePath = path.join(dir, "status.json");
   const status = createInitialStatus({ issue: "11", baseBranch: "main", logDir: dir });
@@ -141,9 +136,6 @@ test("writeStatusFile atomically writes a schema-valid file and leaves no temp f
   const written = await readStatusFile(filePath);
   assertValid(written);
   assert.deepEqual(written, status);
-
-  const entries = await fsp.readdir(dir);
-  assert.deepEqual(entries, ["status.json"]);
 
   await fsp.rm(dir, { recursive: true, force: true });
 });

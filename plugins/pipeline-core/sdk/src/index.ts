@@ -8,14 +8,12 @@
  * verifiable before any real logic exists.
  */
 
-const envelope = {
+import { createStageResult } from "./stage-result";
+
+const envelope = createStageResult({
   status: "error",
-  output: null,
-  raw: "sdk harness stub: stage execution not yet implemented",
-  denials: [],
-  model: "",
   error_kind: "structured_error",
-  elapsed_ms: 0,
-} as const;
+  raw: "sdk harness stub: stage execution not yet implemented",
+});
 
 console.log(JSON.stringify(envelope));

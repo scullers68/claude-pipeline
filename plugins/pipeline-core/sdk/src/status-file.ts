@@ -7,9 +7,7 @@
  */
 
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
-import * as os from "node:os";
-import * as crypto from "node:crypto";
+import { writeJsonAtomically } from "./file-utils";
 
 /** Stage keys initialized by the bash orchestrator's init_status(). */
 export const STAGE_KEYS = [
@@ -200,23 +198,11 @@ export function createInitialStatus(params: {
   };
 }
 
-/**
- * Atomically writes status.json: serialize to a sibling temp file, then
- * rename over the destination, mirroring the bash orchestrator's
- * "$STATUS_FILE.tmp" && mv pattern so readers never see a partial write.
- */
 export async function writeStatusFile(
   filePath: string,
   status: StatusFile,
 ): Promise<void> {
-  const dir = path.dirname(filePath);
-  const tmpPath = path.join(
-    dir,
-    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
-  );
-
-  await fs.writeFile(tmpPath, JSON.stringify(status, null, 2) + os.EOL, "utf8");
-  await fs.rename(tmpPath, filePath);
+  await writeJsonAtomically(filePath, status);
 }
 
 export async function readStatusFile(filePath: string): Promise<StatusFile> {

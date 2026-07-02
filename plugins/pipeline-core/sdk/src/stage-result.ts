@@ -5,10 +5,7 @@
  * rename, or drop fields here without updating that schema first.
  */
 
-import { promises as fs } from "node:fs";
-import * as path from "node:path";
-import * as os from "node:os";
-import * as crypto from "node:crypto";
+import { writeJsonAtomically } from "./file-utils";
 
 export type StageStatus = "success" | "error" | "rate_limit";
 
@@ -53,22 +50,9 @@ export function createStageResult(
   };
 }
 
-/**
- * Atomically writes the envelope: serialize to a sibling temp file, then
- * rename over the destination. Rename is atomic on the same filesystem, so
- * readers never observe a partially-written file — mirrors the bash
- * orchestrator's "$STATUS_FILE.tmp" && mv pattern.
- */
 export async function writeStageResult(
   filePath: string,
   result: StageResult,
 ): Promise<void> {
-  const dir = path.dirname(filePath);
-  const tmpPath = path.join(
-    dir,
-    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
-  );
-
-  await fs.writeFile(tmpPath, JSON.stringify(result, null, 2) + os.EOL, "utf8");
-  await fs.rename(tmpPath, filePath);
+  await writeJsonAtomically(filePath, result);
 }
