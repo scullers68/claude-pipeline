@@ -43,23 +43,26 @@ jobs:
           bash tests/ci-run.sh "${files[@]}"
 
   orchestrator-timers:
-    name: Orchestrator suite, timer-heavy files (known-reds gated)
+    name: Timer file ${{ matrix.file }} (known-reds gated)
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        file:
+          - test-stage-runner
+          - test-timeout-escalation
+          - test-merge-pr-timeouts
+          - test-rate-limit
+          - test-merge-block-convergence
+          - test-soft-fail-convergence
+          - test-integration
     steps:
       - uses: actions/checkout@v4
       - name: Install bats
         run: sudo apt-get update -q && sudo apt-get install -y bats jq
-      - name: Run timer-heavy files (real-clock watchdog/retry/rate-limit tests)
-        run: |
-          bash tests/ci-run.sh \
-            tests/implement-issue-test/test-stage-runner.bats \
-            tests/implement-issue-test/test-timeout-escalation.bats \
-            tests/implement-issue-test/test-merge-pr-timeouts.bats \
-            tests/implement-issue-test/test-rate-limit.bats \
-            tests/implement-issue-test/test-merge-block-convergence.bats \
-            tests/implement-issue-test/test-soft-fail-convergence.bats \
-            tests/implement-issue-test/test-integration.bats
+      - name: Run ${{ matrix.file }} (real-clock tests)
+        run: bash tests/ci-run.sh "tests/implement-issue-test/${{ matrix.file }}.bats"
 
   plugin-structure:
     name: Plugin manifest smoke check
