@@ -27,6 +27,16 @@ setup() {
         echo '{"type":"object"}' > "$SCHEMA_DIR/${schema}.json"
     done
 
+    # Create a fake git repo
+    mkdir -p "$TEST_TMP/repo"
+    cd "$TEST_TMP/repo"
+    git init -q
+    git checkout -q -b test
+    echo "initial" > README.md
+    git add README.md
+    git commit -q -m "initial"
+    git checkout -q -b test-branch
+
     # Source the orchestrator functions
     source_orchestrator_functions
 
@@ -46,9 +56,9 @@ teardown() {
     # Mock run_stage to return structured output with .result
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
-            review-*) echo '{"status":"success","result":"approved","summary":"Code review complete","issues":[]}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
+            review-*) echo '{"status":"success","output":{"result":"approved","summary":"Code review complete","issues":[]}}' ;;
         esac
     }
     export -f run_stage
@@ -57,7 +67,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     # Verify the quality loop completed successfully (approved verdict)
     local quality_iterations
@@ -68,11 +78,11 @@ teardown() {
 @test "verdict parsing: structured output with changes_requested in .result field" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # Return changes_requested in structured .result field
-                echo '{"status":"success","result":"changes_requested","summary":"Found issues","issues":[{"description":"Fix formatting"}]}'
+                echo '{"status":"success","output":{"result":"changes_requested","summary":"Found issues","issues":[{"description":"Fix formatting"}]}}'
                 ;;
         esac
     }
@@ -83,7 +93,7 @@ teardown() {
 
     # Should continue looping due to changes_requested verdict
     # This will eventually exit due to convergence detection
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     # Verify verdict was extracted correctly from .result field in the logs
     grep -q "Verdict extracted from structured output: changes_requested" "$LOG_FILE" || \
@@ -97,12 +107,12 @@ teardown() {
 @test "verdict parsing: fallback with 'approved' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # No .result field, must use fallback parsing
                 # Summary contains "approved"
-                echo '{"status":"success","summary":"Code review approved - no issues found","issues":[]}'
+                echo '{"status":"success","output":{"summary":"Code review approved - no issues found","issues":[]}}'
                 ;;
         esac
     }
@@ -111,7 +121,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     # Should complete after one iteration (approved)
     local quality_iterations
@@ -122,11 +132,11 @@ teardown() {
 @test "verdict parsing: fallback with 'LGTM' keyword in summary (case-insensitive)" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # No .result field, LGTM in summary
-                echo '{"status":"success","summary":"LGTM - looks good to merge","issues":[]}'
+                echo '{"status":"success","output":{"summary":"LGTM - looks good to merge","issues":[]}}'
                 ;;
         esac
     }
@@ -135,7 +145,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     # Should complete after one iteration (LGTM parsed as approved)
     local quality_iterations
@@ -146,10 +156,10 @@ teardown() {
 @test "verdict parsing: fallback with 'looks good' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"This looks good to me","issues":[]}'
+                echo '{"status":"success","output":{"summary":"This looks good to me","issues":[]}}'
                 ;;
         esac
     }
@@ -158,7 +168,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     local quality_iterations
     quality_iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
@@ -168,10 +178,10 @@ teardown() {
 @test "verdict parsing: fallback with 'no issues' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"No issues found in this code","issues":[]}'
+                echo '{"status":"success","output":{"summary":"No issues found in this code","issues":[]}}'
                 ;;
         esac
     }
@@ -180,7 +190,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     local quality_iterations
     quality_iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
@@ -190,11 +200,11 @@ teardown() {
 @test "verdict parsing: fallback with 'changes requested' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # No .result field, "changes requested" in summary
-                echo '{"status":"success","summary":"Changes requested - fix the formatting","issues":[{"description":"Fix formatting"}]}'
+                echo '{"status":"success","output":{"summary":"Changes requested - fix the formatting","issues":[{"description":"Fix formatting"}]}}'
                 ;;
         esac
     }
@@ -203,7 +213,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     # Verify verdict was parsed correctly from fallback text
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
@@ -213,10 +223,10 @@ teardown() {
 @test "verdict parsing: fallback with 'request changes' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"Please request changes before merging","issues":[{"description":"Needs work"}]}'
+                echo '{"status":"success","output":{"summary":"Please request changes before merging","issues":[{"description":"Needs work"}]}}'
                 ;;
         esac
     }
@@ -225,7 +235,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
         fail "Should parse 'request changes' as changes_requested from fallback text"
@@ -234,10 +244,10 @@ teardown() {
 @test "verdict parsing: fallback with 'must fix' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"Must fix critical security issue","issues":[{"severity":"critical"}]}'
+                echo '{"status":"success","output":{"summary":"Must fix critical security issue","issues":[{"severity":"critical"}]}}'
                 ;;
         esac
     }
@@ -246,7 +256,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
         fail "Should parse 'must fix' as changes_requested from fallback text"
@@ -255,10 +265,10 @@ teardown() {
 @test "verdict parsing: fallback with 'blocking' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"This is a blocking issue","issues":[{"priority":"blocking"}]}'
+                echo '{"status":"success","output":{"summary":"This is a blocking issue","issues":[{"priority":"blocking"}]}}'
                 ;;
         esac
     }
@@ -267,7 +277,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
         fail "Should parse 'blocking' as changes_requested from fallback text"
@@ -276,10 +286,10 @@ teardown() {
 @test "verdict parsing: fallback with 'critical' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"Critical issues found in the code","issues":[{"severity":"critical"}]}'
+                echo '{"status":"success","output":{"summary":"Critical issues found in the code","issues":[{"severity":"critical"}]}}'
                 ;;
         esac
     }
@@ -288,7 +298,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
         fail "Should parse 'critical' as changes_requested from fallback text"
@@ -301,8 +311,8 @@ teardown() {
 @test "verdict parsing: fallback with ambiguous text defaults to changes_requested" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # No .result field, ambiguous summary (no approval or rejection keywords)
                 echo '{"status":"success","summary":"Review completed","issues":[]}'
@@ -316,7 +326,7 @@ teardown() {
 
     # Run quality loop - ambiguous verdict should be treated as changes_requested
     # Use BATS 'run' to capture exit code without failing on max-iterations exit
-    run run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     # Verify ambiguous text defaults to changes_requested (regardless of loop exit code)
     grep -q "Verdict parsed from fallback text: changes_requested (ambiguous/default)" "$LOG_FILE" || \
@@ -326,8 +336,8 @@ teardown() {
 @test "verdict parsing: fallback with neutral text defaults to changes_requested" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # Neutral text with no verdict keywords
                 echo '{"status":"success","summary":"Code review in progress","issues":[]}'
@@ -339,7 +349,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     grep -q "Verdict parsed from fallback text: changes_requested (ambiguous/default)" "$LOG_FILE" || \
         fail "Neutral text should default to changes_requested"
@@ -348,8 +358,8 @@ teardown() {
 @test "verdict parsing: fallback with empty summary defaults to changes_requested" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # Empty summary field (will use default "Review completed")
                 echo '{"status":"success","summary":"","issues":[]}'
@@ -361,7 +371,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     grep -q "Verdict parsed from fallback text: changes_requested (ambiguous/default)" "$LOG_FILE" || \
         fail "Empty summary should default to changes_requested"
@@ -383,7 +393,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     grep -q "Verdict parsed from fallback text: changes_requested (ambiguous/default)" "$LOG_FILE" || \
         fail "Missing summary field should default to changes_requested"
@@ -396,10 +406,10 @@ teardown() {
 @test "verdict parsing: fallback with uppercase APPROVED in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"APPROVED: No issues","issues":[]}'
+                echo '{"status":"success","output":{"summary":"APPROVED: No issues","issues":[]}}'
                 ;;
         esac
     }
@@ -408,7 +418,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     # Should complete after one iteration (case-insensitive approved)
     local quality_iterations
@@ -419,10 +429,10 @@ teardown() {
 @test "verdict parsing: fallback with mixed case 'Changes Requested' in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"Changes Requested - please fix","issues":[{"description":"Fix it"}]}'
+                echo '{"status":"success","output":{"summary":"Changes Requested - please fix","issues":[{"description":"Fix it"}]}}'
                 ;;
         esac
     }
@@ -431,7 +441,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
         fail "Mixed case 'Changes Requested' should match rejection keywords (case-insensitive)"

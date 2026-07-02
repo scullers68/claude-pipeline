@@ -81,15 +81,15 @@ git diff HEAD~1 -- .claude/agents/ .claude/skills/ .claude/config/
 
 ## What's Inside
 
-- **29 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
+- **38 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
 - **8 specialized agents** (backend/frontend developers, reviewers, validators, Playwright test developer, orchestration writer)
-- **12 platform wrapper scripts** for GitHub/GitLab/Jira abstraction (including ADF/wiki format converters)
+- **12 platform wrapper scripts** for GitHub/GitLab/Jira abstraction (including format converters)
 - **2 hooks** for session initialization and post-PR simplification
 - **2 orchestration scripts** for batch issue processing and end-to-end implementation
 - **13 JSON schemas** for structured output at each pipeline stage
-- **30 BATS test files** across orchestrator and platform wrapper test suites
+- **42 BATS test files, 1,265 tests** across orchestrator and platform wrapper test suites
+- **6 decision and validation scripts** (`decide-action.sh`, `decide-retry.sh`, `decide-model-fallback.sh`, `skill-validate.sh`, `skill-golden-lib.sh`, `skill-golden.sh`) bridging bash orchestration and skill-native policy evaluation
 - **Quality gates** at every stage: spec compliance, code quality, test validation, acceptance testing
-- **Auto-merge** when code review approves the PR
 
 ## Architecture
 
@@ -116,6 +116,7 @@ The `implement-issue-orchestrator.sh` (~5,000 lines) runs 11 stages per issue:
 |-------|-----------|-------------|
 | `parse_issue` | light (haiku) | Fetch issue body, extract tasks via fuzzy parser, compute batch assignments |
 | `validate_plan` | light (haiku) | Verify agent names exist, check file paths, warn on oversized tasks |
+| `triage` | light (haiku) | Classify issue as fast-path (surgical: no quality/test loops) or full (standard pipeline) via triage-classify skill |
 | `implement` | standard (sonnet) | Execute tasks in dependency-aware batches (serial or parallel via worktrees) |
 | `quality_loop` | mixed | Iterative simplify → review → fix cycle (up to 3 iterations) |
 | `test_loop` | mixed | Smart test targeting with convergence detection (stops on repeated failures) |
@@ -141,15 +142,13 @@ handle-issues (skill) → batch-orchestrator.sh
 
 ### Key Orchestrator Features
 
+- **Skill-native triage** — each issue is classified before implementation; fast-path skips quality and test loops for surgical single-file changes
 - **Fuzzy task parsing** — handles missing backticks, asterisk bullets, leading whitespace, and missing square brackets with warnings
-- **Affected files extraction** — parses `Affected files:` lines from issue bodies and attaches them to tasks for accurate dependency detection
-- **Dependency-aware batching** — tasks with non-overlapping file sets (from explicit `affected_files` or regex extraction) are grouped into parallel batches; tasks sharing files run sequentially to prevent merge conflicts
-- **Worktree parallelism** — parallel batches execute in isolated git worktrees with per-task wall-time limits (default 30 min) and merge back to the feature branch
-- **Implementation guardrails** — aborts early with a clear error if 0 tasks complete or if the feature branch has 0 commits after implementation (prevents cascading failures through test/PR stages)
+- **Task batching** — tasks with non-overlapping file sets are grouped into parallel batches; tasks sharing files run sequentially
+- **Worktree parallelism** — parallel batches execute in isolated git worktrees and merge back
 - **Pipeline profiles** — classifies issues as minimal/standard/full based on task count and complexity (see table below)
 - **Smart test targeting** — runs only tests related to changed files; detects convergence (repeated identical failures) and breaks loops
 - **Model escalation** — each stage has a fallback model one tier up (haiku→sonnet→opus) for resilience; double-timeout triggers automatic escalation
-- **Auto-merge** — when the PR review stage approves, the orchestrator automatically merges the PR/MR
 - **Metrics export** — tracks quality iterations, test iterations, PR review iterations, and escalations; feeds into [claude-spend](#spend-analysis-with-claude-spend)
 - **Binary file sanitization** — scans commits for accidentally staged binary/data files and removes them before pushing
 - **Resume support** — can resume from any stage after interruption
@@ -169,17 +168,17 @@ The orchestrator classifies each run into a profile based on task complexity, th
 | Category | Skills | Purpose |
 |----------|--------|---------|
 | **Discovery** | explore, investigating-codebase-for-user-stories | Turn ideas into fully-planned issues |
-| **Process** | brainstorming, TDD, systematic-debugging, writing-plans, dispatching-parallel-agents | Enforce discipline and methodology |
-| **Workflow** | handle-issues, implement-issue, process-pr, pr-creation, pr-review, subagent-driven-development, executing-plans | Automate multi-step development workflows |
+| **Process** | brainstorming, TDD, systematic-debugging, writing-plans, dispatching-parallel-agents, test-validation | Enforce discipline and methodology |
+| **Workflow** | handle-issues, implement-issue, process-pr, subagent-driven-development, executing-plans, fix-from-review, pr-review, pr-creation, complete-summary | Automate multi-step development workflows |
 | **Domain** | bulletproof-frontend, ui-design-fundamentals, write-docblocks, review-ui, playwright-testing | Tech-stack-specific guidance |
 | **Reference** | mcp-tools, using-skills | Tool selection and skill discovery |
-| **Meta** | writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop, create-session-summary, complete-summary, resume-session | Maintain and extend the pipeline itself |
-| **Quality** | test-validation, fix-from-review | Post-implementation validation and review-driven fixes |
+| **Pipeline Policy** | escalation-policy, retry-policy, model-fallback, triage-classify | Document when to escalate/retry/bail and which model to use next — evaluated by decide-*.sh scripts |
+| **Meta** | writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop, create-session-summary, resume-session, pipeline-feedback, pipeline-recovery, pipeline-sync | Maintain and extend the pipeline itself |
 | **Utility** | using-git-worktrees | Workspace isolation for feature work |
 
 ### Model Configuration
 
-The pipeline uses a three-tier model abstraction (`model-config.sh`) that decouples stages from specific model names:
+The pipeline uses a three-tier model abstraction (`model-config.sh`) — **pure data** — lookup arrays for tier/model/stage mappings only; no decision branches — that decouples stages from specific model names:
 
 | Tier | Model | Used For |
 |------|-------|----------|
@@ -188,6 +187,16 @@ The pipeline uses a three-tier model abstraction (`model-config.sh`) that decoup
 | **advanced** | opus | Deep reasoning: complex implementation (L-complexity tasks), unknown stages |
 
 Task complexity hints (`S`/`M`/`L`) from issue parsing override stage defaults — S and M use sonnet, L uses opus. Light-tier stages always use haiku regardless of complexity.
+
+#### Decision layer
+
+The three decision scripts read from `model-config.sh` and apply policy logic:
+
+| Script | Companion skill |
+|--------|----------------|
+| `decide-action.sh` | `escalation-policy` |
+| `decide-retry.sh` | `retry-policy` |
+| `decide-model-fallback.sh` | `model-fallback` |
 
 ## Orchestrator Features
 
@@ -396,7 +405,7 @@ The orchestrator parses tasks from issue bodies using this convention:
 - **Done condition** `Done when: [criterion]` — explicit stopping condition
 - **Affected files** — exact file paths to read/modify, prevents broad exploration
 
-**Parsing:** The fuzzy parser handles common formatting variations (missing backticks, asterisk bullets, extra whitespace) and emits warnings on stderr. Tasks without a complexity hint default to M. The parser runs a second pass to extract `Affected files:` lines and attach them to the preceding task — these are used by `compute_task_batches` to detect file-level dependencies and prevent merge conflicts in parallel execution.
+**Parsing:** The fuzzy parser handles common formatting variations (missing backticks, asterisk bullets, extra whitespace) and emits warnings on stderr. Tasks without a complexity hint default to M.
 
 **Agent values** should match your `.claude/agents/` directory. The adaptation skill sets these up for your tech stack.
 
@@ -417,15 +426,30 @@ After resolving a bug or observing a recurring problem:
 > /improvement-loop
 ```
 
+### Skill Frontmatter
+
+All 38 skills carry structured YAML frontmatter that makes their contracts machine-readable:
+
+```yaml
+inputs: [issue_number, base_branch]
+outputs: [pr_url, branch_name]
+side_effects: [github_comments, git_push]
+composes: [brainstorming, test-driven-development]
+failure_modes: [api_timeout, merge_conflict]
+```
+
+A pre-commit hook (`skill-validate.sh`) validates every skill file against this schema before it can be committed, preventing undocumented inputs, outputs, or side effects from entering the pipeline.
+
 ## Hooks
 
 - **Session Start** (`hooks/session-start.sh`): Injects `using-skills` into every conversation
 - **Post-PR Simplify** (`hooks/post-pr-simplify.sh`): Runs code-simplifier after PR/MR creation (platform-agnostic)
+- **RTK Command Rewrite** (`hooks/rtk-rewrite.sh`): PreToolUse hook that rewrites verbose Bash commands through [RTK](https://rtk.sh) (Rust Token Killer) to reduce token consumption. Opt-in via `RTK_ENABLED=1`. Registered as a repo-local hook in `.claude/settings.local.json` (not synced).
 
 ## Testing
 
 ```bash
-# Orchestrator tests (23 test files, ~930 tests)
+# Orchestrator tests (35 test files)
 cd .claude/scripts/implement-issue-test
 ./run-tests.sh
 
@@ -434,33 +458,9 @@ cd .claude/scripts/platform-test
 ./run-tests.sh
 ```
 
+Decision skill tests use a golden-fixture harness (`skill-golden-lib.sh`) with mock Claude to verify escalation-policy, retry-policy, model-fallback, and triage-classify outputs without live API calls.
+
 Test coverage includes: argument parsing, branch verification, comment helpers, constants, deploy verification, environment error detection, metrics export, fuzzy task parsing, helper functions, integration, JSON parsing, model config, pipeline profiles, PR review config, prompt file lists, quality loop, rate limiting, smart test targeting, stage runner, status functions, task batching, timeout escalation, and verdict parsing.
-
-## Recent Changes
-
-### v2025-03 (March 2026)
-
-**Orchestrator reliability:**
-- Fixed undefined `MAX_TASK_WALL_TIME_SECS` that silently crashed parallel task execution after launching the first task
-- Added guardrails: abort on 0 completed tasks, abort on 0 commits after implementation stage
-- `affected_files` now parsed from issue bodies and used for dependency-aware batching — tasks sharing files run sequentially, preventing merge conflicts
-- Per-task file set logging for debugging batch assignment decisions
-- SIGPIPE prevention for background orchestrator launches
-
-**PR workflow:**
-- Auto-merge when code review approves the PR
-- New `pr-creation` and `pr-review` skills with orchestrator integration
-- Improved PR review prompt quality with follow-up issue generation
-
-**New skills:**
-- `complete-summary` — structured session completion reports
-- `test-validation` — post-implementation test verification
-- `fix-from-review` — apply code review feedback systematically
-
-**Platform support:**
-- Jira comments and descriptions now convert to ADF format (Atlassian Document Format)
-- macOS compatibility fixes for `handle-issues` (jq null guards, paste→awk)
-- Jira `create-issue` error handling improvements
 
 ## Philosophy
 
@@ -500,6 +500,132 @@ Your CLAUDE.md is re-read on every message in every conversation. Each line comp
 - Keep it under 30-40 lines. Move rarely-needed sections to separate files.
 - The `/adapting-claude-pipeline` skill includes a lean CLAUDE.md template.
 - Remove technology checklists from agent definitions — put them in stage-specific prompts loaded only when needed.
+
+### RTK (Rust Token Killer)
+
+RTK rewrites verbose Bash command output (git, ls, grep, find) at the shell level before it enters the context window, reducing token consumption on read-heavy operations.
+
+**Install:**
+```bash
+brew install rtk
+# or
+curl -fsSL https://rtk.sh | sh
+```
+
+**Enable:** Add `export RTK_ENABLED=1` to your shell profile, or set it per session. Register the hook in `.claude/settings.local.json` (this file is gitignored — create it if absent):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/rtk-rewrite.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook activates automatically once registered.
+
+**Measure gain:** Run `claude-spend` before and after enabling RTK on a typical pipeline run. Token counts on Bash tool calls with git/ls/grep output will decrease proportional to output verbosity.
+
+**Rollback:** `unset RTK_ENABLED` or set `RTK_ENABLED=0`. The hook no-ops immediately — no restart required.
+
+## Context Mode
+
+[Context Mode](https://github.com/mksglu/context-mode) is an opt-in Claude Code plugin
+(MCP server + Claude Code plugin) that sandboxes large tool outputs into subprocesses
+(~98% reduction on big snapshots), persists session state to SQLite across compaction,
+and indexes markdown into an FTS5/BM25 search base. It is licensed under
+**ELv2 (Elastic License 2.0)** — free to use, but with restrictions on hosting it as
+a service. Review the license before deploying in a SaaS environment.
+
+### Install
+
+Context Mode is managed by Claude Code's plugin system — run these slash commands
+**inside an active Claude Code session**:
+
+```
+/plugin marketplace add mksglu/context-mode
+/plugin install context-mode@context-mode
+/reload-plugins
+```
+
+Requires Node ≥ 22.5 or Bun. No cloud account or `ctx login` step is needed —
+all state is stored locally in SQLite.
+
+After installing, enable in this project:
+
+```bash
+export CONTEXT_MODE_ENABLED=1
+```
+
+To make this permanent, **do not edit `.claude/config/platform.sh` directly** in consumer repos — `platform.sh` is managed by `sync.sh` and will be overwritten on the next sync. Instead, choose one of:
+
+- **Shell profile** (e.g. `~/.bashrc`, `~/.zshrc`): add `export CONTEXT_MODE_ENABLED=1` and restart your terminal.
+- **Gitignored local env file** — create `.claude/env.local` (already in `.gitignore`) and add `export CONTEXT_MODE_ENABLED=1`, then source it from your shell profile: `source /path/to/project/.claude/env.local`. This keeps project-specific env vars in the project directory and out of your global shell config.
+
+> **Upstream repo only:** Editing `.claude/config/platform.sh` is appropriate only in this upstream pipeline repository.
+
+### Verify the integration
+
+After installing, run the smoke-check script:
+
+```bash
+.claude/scripts/context-mode-check.sh
+```
+
+Or via the Claude Code slash command (if the skill is installed):
+
+```
+/context-mode:ctx-doctor
+```
+
+The script runs `ctx doctor` and `ctx stats`, then runs the orchestrator BATS parsing-assertion suite to confirm Context Mode does not break output parsing. Exit 0 = everything healthy.
+
+### Hook interactions with the pipeline
+
+Context Mode registers its hooks via the **plugin** (cached under `~/.claude/plugins/cache/context-mode/`), not via `settings.local.json`. Empirically (`/context-mode:ctx-doctor`, v1.0.168) it registers **six** hook scripts: `SessionStart`, `PreToolUse`, `PostToolUse`, `PreCompact`, `UserPromptSubmit`, and `Stop`. The pipeline uses `SessionStart`, `PreToolUse`, `PostToolUse`, and `UserPromptSubmit`:
+
+| Hook event | Pipeline hook | Context Mode hook | Interaction (empirically verified) |
+|---|---|---|---|
+| `SessionStart` | `hooks/session-start.sh` — injects `using-skills` | session hydration (capture/restore) | No conflict — both fire in registration order; neither consumes the other's output. |
+| `PreToolUse / Edit\|Write` | `pre-commit-skill-validate.sh`, path guard `python3 -c ...` | output sandboxing (capture) | No conflict — pipeline hooks gate destructive edits; Context Mode captures/compresses. Different data. |
+| `PreToolUse / Bash` | `block-destructive-db-commands.sh`, `block-gh-issue-create.sh` | **advisory** `context_guidance` (suggests `ctx_execute` for output-heavy commands) | No conflict — Context Mode's Bash hook DOES inspect the command but only **adds advisory context** (non-blocking, exit 0); the pipeline's **blocking** guards (exit 2) still fire and win. Both observed firing this session without interference. |
+| `UserPromptSubmit` | `pipeline-status-inject.sh` | session-memory injection | No conflict — both append context; additive, not mutually exclusive. |
+| `PostToolUse` | `sync-reminder.sh`, `post-pr-simplify.sh` | output capture/index | No conflict — both observe completed tool calls; neither mutates the result. |
+
+**Verdict (empirically validated 2026-06-28, v1.0.168):** Context Mode hooks and pipeline hooks are orthogonal. Context Mode's hooks are **advisory/capture** (they add context or index output, exit 0); the pipeline's are **blocking guards** (exit 2 to reject). Both classes fired together this session with no suppression — `ctx doctor`/`ctx stats` pass via the `context-mode` CLI, and the pipeline's `block-gh-issue-create` guard still blocked correctly while Context Mode's Bash guidance appeared as an advisory tip. If you observe unexpected behaviour after enabling Context Mode, run `.claude/scripts/context-mode-check.sh` to confirm the parsing-assertion checks still pass.
+
+### Rollback
+
+```bash
+# 1. Immediately disable token/context compression (no restart required)
+export CONTEXT_MODE_ENABLED=0
+
+# 2. Permanently disable — upstream repo only: set in platform.sh
+#    Consumer repos: set CONTEXT_MODE_ENABLED=0 in your shell profile
+#    or in a gitignored local env file (.claude/env.local) instead
+CONTEXT_MODE_ENABLED=0
+
+# 3. Uninstall the plugin (inside a Claude Code session)
+#    /plugin uninstall context-mode
+#    /reload-plugins
+
+# 4. Optionally purge local SQLite state
+ctx purge
+
+# Remove any Context Mode hooks from local settings (if added manually)
+# Edit .claude/settings.local.json and delete ctx / Context Mode entries
+# under "hooks".  The file is gitignored so edits are local only.
+```
 
 ### Pipeline-Specific
 

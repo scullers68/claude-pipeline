@@ -9,6 +9,7 @@ load 'helpers/test-helper.bash'
 setup() {
     setup_test_env
     install_mocks
+    install_decide_scripts
 
     # Set required variables
     export ISSUE_NUMBER=123
@@ -43,13 +44,38 @@ teardown() {
 }
 
 # =============================================================================
+# PORTABLE TIMEOUT — EXIT-124 SEMANTICS
+#
+# _timeout_perl_fallback is always defined in the orchestrator (regardless of
+# host binaries) so BATS can call it directly to verify that the perl path
+# exits 124 on timeout and passes through command exit codes on success.
+# =============================================================================
+
+@test "perl fallback exits 124 when command times out" {
+    run _timeout_perl_fallback 1 sleep 5
+    [ "$status" -eq 124 ]
+}
+
+@test "perl fallback exits 0 when command completes within timeout" {
+    run _timeout_perl_fallback 5 true
+    [ "$status" -eq 0 ]
+}
+
+@test "perl fallback passes through non-zero exit code on success" {
+    run _timeout_perl_fallback 5 bash -c "exit 42"
+    [ "$status" -eq 42 ]
+}
+
+# =============================================================================
 # SCHEMA VALIDATION
 # =============================================================================
 
 @test "run_stage fails with missing schema file" {
     run run_stage "test-stage" "test prompt" "nonexistent.json"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"schema not found"* ]]
+    # New stage_result envelope reports error_kind="schema_not_found"
+    # (snake_case; see schemas/stage-result.json enum).
+    [[ "$output" == *"schema_not_found"* ]]
 }
 
 @test "run_stage uses correct schema file" {
@@ -58,6 +84,7 @@ teardown() {
     echo '{"result":"ok","structured_output":{"status":"success","result":"done"}}' > "$MOCK_CLAUDE_RESPONSE"
 
     run run_stage "test-stage" "test prompt" "test-schema.json"
+    [ "$status" -eq 0 ] || fail "run_stage failed: $output"
 
     # Check that the stage log was created
     local stage_log
@@ -149,8 +176,10 @@ teardown() {
     result=$(run_stage "test" "prompt" "test-schema.json" | grep '^{')
     [ -n "$result" ] || fail "run_stage returned no JSON output"
 
+    # Envelope: .status reflects run-level outcome; .output carries the
+    # parsed structured output from the agent (issue #178 PR-A).
     local extracted_status
-    extracted_status=$(echo "$result" | jq -r '.status')
+    extracted_status=$(echo "$result" | jq -r '.output.status')
     [ "$extracted_status" = "success" ]
 }
 
@@ -160,7 +189,8 @@ teardown() {
 
     run run_stage "test" "prompt" "test-schema.json"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"no structured output"* ]]
+    # Envelope reports error_kind="no_structured_output" (snake_case enum).
+    [[ "$output" == *"no_structured_output"* ]]
 }
 
 # =============================================================================
@@ -180,7 +210,7 @@ teardown() {
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
 	local pr_number
-	pr_number=$(printf '%s' "$result" | jq -r '.pr_number // empty')
+	pr_number=$(printf '%s' "$result" | jq -r '.output.pr_number // empty')
 	[ "$pr_number" = "42" ] || \
 		fail "Expected pr_number=42, got: $pr_number (full output: $result)"
 }
@@ -199,7 +229,7 @@ teardown() {
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
 	local pr_number
-	pr_number=$(printf '%s' "$result" | jq -r '.pr_number // empty')
+	pr_number=$(printf '%s' "$result" | jq -r '.output.pr_number // empty')
 	[ -z "$pr_number" ] || \
 		fail "pr_number should be empty for bare issue ref, got: $pr_number"
 }
@@ -217,7 +247,7 @@ teardown() {
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
 	local branch
-	branch=$(printf '%s' "$result" | jq -r '.branch // empty')
+	branch=$(printf '%s' "$result" | jq -r '.output.branch // empty')
 	[ "$branch" = "feature/issue-52" ] || \
 		fail "Expected branch=feature/issue-52, got: $branch (full output: $result)"
 }
@@ -239,7 +269,7 @@ teardown() {
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
 	local tasks_count
-	tasks_count=$(printf '%s' "$result" | jq -r 'if .tasks then (.tasks | length) else 0 end')
+	tasks_count=$(printf '%s' "$result" | jq -r 'if .output.tasks then (.output.tasks | length) else 0 end')
 	[ "$tasks_count" = "2" ] || \
 		fail "Expected 2 tasks, got: $tasks_count (full output: $result)"
 }
@@ -256,10 +286,12 @@ teardown() {
 	result=$(run_stage "implement" "prompt" "test-schema.json" | grep '^{')
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
+	# Envelope-level status reflects run-level success even when no fields
+	# extracted from .result text — agent's status sits under .output.status.
 	local status_val
-	status_val=$(printf '%s' "$result" | jq -r '.status')
+	status_val=$(printf '%s' "$result" | jq -r '.output.status')
 	[ "$status_val" = "success" ] || \
-		fail "Expected status=success, got: $status_val (full output: $result)"
+		fail "Expected output.status=success, got: $status_val (full output: $result)"
 }
 
 # =============================================================================
@@ -276,7 +308,8 @@ teardown() {
 
     run run_stage "test" "prompt" "test-schema.json"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"timeout"* ]]
+    [[ "$output" == *"timeout"* ]] \
+        || fail "Expected output to contain 'timeout'; got: $output"
 }
 
 @test "run_stage retries with 20% longer timeout after initial timeout" {
@@ -310,6 +343,69 @@ teardown() {
     expected_retry=$(( first_timeout + first_timeout / 5 ))
     (( second_timeout == expected_retry )) || \
         fail "Expected retry timeout ${expected_retry}s, got ${second_timeout}s"
+}
+
+@test "parent watchdog fires when inner timeout wrapper hangs" {
+    # Simulate an inner timeout(1) wrapper that never exits — the
+    # parent-side watchdog must enforce stage_timeout independently
+    # and return a stage failure.  A FIFO is used to block the first
+    # call without spawning orphan sleep processes; a counter file
+    # ensures the retry path returns 124 immediately (no infinite block).
+    local hang_fifo="$TEST_TMP/hang.fifo"
+    mkfifo "$hang_fifo"
+    local wd_calls_file="$TEST_TMP/wd-calls.txt"
+    export wd_calls_file
+    timeout() {
+        local _n
+        _n=$(wc -l < "$wd_calls_file" 2>/dev/null || printf '0')
+        printf '\n' >> "$wd_calls_file"
+        if (( _n == 0 )); then
+            # First call: block on FIFO until killed by the watchdog
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            # Subsequent calls (retry): simulate timeout immediately
+            return 124
+        fi
+    }
+    export -f timeout
+    export hang_fifo
+
+    # Pass 1s as timeout_override (arg 6) so the test completes quickly
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"timeout"* ]] \
+        || fail "Expected output to contain 'timeout'; got: $output"
+}
+
+@test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
+    # Reproduce the original bug: perl alarm() wrapper and claude child are
+    # both dead, leaving a childless subshell that blocks indefinitely.
+    # Because timeout() is a bash function (not a subprocess), the stage
+    # subshell has NO child processes from the moment it starts — it is
+    # childless.  Unlike the "inner timeout wrapper hangs" test (which has
+    # the retry return 124 immediately), here BOTH the initial attempt and
+    # the retry block childlessly, exercising the retry-path watchdog too.
+    # run_stage must return a failure within the wall-limit on both passes.
+    local hang_fifo="$TEST_TMP/childless-hang.fifo"
+    mkfifo "$hang_fifo"
+    export hang_fifo
+
+    timeout() {
+        # bash function: no child processes exist — the stage subshell is
+        # childless.  Block on a FIFO with no writer; only the parent
+        # watchdog's SIGTERM can interrupt this read.  No output is emitted
+        # so run_stage cannot recover structured data from either attempt.
+        read -r _ < "$hang_fifo" 2>/dev/null || true
+    }
+    export -f timeout
+
+    # 1s timeout_override keeps wall-time short (~2 s total: 1 s initial +
+    # 1 s retry) while exercising both the initial and retry watchdogs.
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [ "$status" -eq 1 ] \
+        || fail "Expected run_stage to fail (childless subshell wedge); status=$status output=$output"
+    [[ "$output" == *"timeout"* ]] \
+        || fail "Expected 'timeout' in output (childless subshell wedge); got: $output"
 }
 
 # =============================================================================
@@ -455,6 +551,12 @@ teardown() {
 # AGENT SELECTION
 # =============================================================================
 
+@test "orchestrator declares _AGENT_SENTINEL_DEFAULT as readonly with value 'default'" {
+	grep -qE '^[[:space:]]*readonly[[:space:]]+_AGENT_SENTINEL_DEFAULT="default"[[:space:]]*$' \
+		"$ORCHESTRATOR_SCRIPT" || \
+		fail "ORCHESTRATOR_SCRIPT must declare: readonly _AGENT_SENTINEL_DEFAULT=\"default\""
+}
+
 @test "run_stage passes agent when specified" {
     # Override timeout to intercept and record claude args
     local claude_calls="$TEST_TMP/claude-calls.txt"
@@ -468,12 +570,70 @@ teardown() {
     }
     export -f timeout
 
-    run_stage "test" "prompt" "test-schema.json" "fastify-backend-developer"
+    # Use `run` so the assertion targets the recorded CLI args (written by the
+    # mock before any post-launch action) rather than run_stage's exit status —
+    # mirrors the 'default' sentinel test below.
+    run run_stage "test" "prompt" "test-schema.json" "fastify-backend-developer"
 
     # Verify agent was passed to claude
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--agent fastify-backend-developer" "$claude_calls" || \
         fail "Agent 'fastify-backend-developer' was not passed to claude. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage omits --agent flag when agent sentinel is 'default'" {
+    # 'default' is the sentinel _normalize_agent_name emits for unresolvable
+    # agent names. run_stage must NOT pass --agent default to the CLI.
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift  # skip timeout value
+        shift  # skip 'env'
+        shift  # skip '-u'
+        shift  # skip 'CLAUDECODE'
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run run_stage "test" "prompt" "test-schema.json" "default"
+    [ "$status" -eq 0 ] || fail "run_stage failed: $output"
+
+    # Claude must have been invoked (the mock timeout() wrote the call)
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    # --agent must NOT appear in the recorded call args
+    if grep -q -- "--agent" "$claude_calls"; then
+        fail "--agent must not be passed when sentinel is 'default'. Calls: $(cat "$claude_calls")"
+    fi
+}
+
+@test "run_stage bails with agent_not_found when claude reports agent not found" {
+    # Simulate the claude CLI exiting non-zero with the agent-not-found message
+    # it emits when --agent names an unknown subtype.  run_stage must classify
+    # this as agent_not_found and bail immediately without retrying.
+    local calls_file="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        printf -- "--agent 'bad-agent' not found\n"
+        echo "called" >> "$calls_file"
+        return 1
+    }
+    export -f timeout
+
+    run run_stage "stage-1" "prompt" "test-schema.json" "bad-agent"
+
+    # run_stage must bail (non-zero exit)
+    [ "$status" -ne 0 ] || \
+        fail "Expected non-zero exit when agent not found, got: status=$status"
+
+    # Stage result envelope must report error_kind=agent_not_found
+    [[ "$output" == *'"agent_not_found"'* ]] || \
+        fail "Expected agent_not_found in stage result, got: $output"
+
+    # Must not retry — exactly one invocation of the claude CLI
+    local call_count=0
+    [[ -f "$calls_file" ]] && \
+        call_count=$(wc -l < "$calls_file" | tr -d '[:space:]')
+    [ "$call_count" -eq 1 ] || \
+        fail "Expected exactly 1 claude invocation (no retry), got: $call_count"
 }
 
 # =============================================================================
@@ -490,7 +650,7 @@ teardown() {
 # =============================================================================
 
 @test "run_stage passes --model to claude" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift  # timeout value
@@ -509,8 +669,8 @@ teardown() {
         fail "--model was not passed to claude. Calls: $(cat "$claude_calls")"
 }
 
-@test "run_stage resolves opus for implement stage" {
-    source "$TEST_TMP/model-config.sh"
+@test "run_stage resolves opus for implement stage with L complexity" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -519,15 +679,17 @@ teardown() {
     }
     export -f timeout
 
-    run_stage "implement-task-1" "prompt" "test-schema.json" "" ""
+    # implement defaults to sonnet (standard tier); L complexity escalates it
+    # to the advanced (opus) tier.
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--model opus" "$claude_calls" || \
-        fail "Expected --model opus for implement stage. Calls: $(cat "$claude_calls")"
+        fail "Expected --model opus for implement stage with L complexity. Calls: $(cat "$claude_calls")"
 }
 
 @test "run_stage resolves haiku for test stage" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -536,7 +698,8 @@ teardown() {
     }
     export -f timeout
 
-    run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
+    # "test" is a light-tier stage → haiku. (test-iter is standard → sonnet.)
+    run_stage "test" "prompt" "test-schema.json" "" ""
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--model haiku" "$claude_calls" || \
@@ -544,7 +707,7 @@ teardown() {
 }
 
 @test "run_stage uses complexity hint to override model" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -562,7 +725,7 @@ teardown() {
 }
 
 @test "run_stage logs model in stage output" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -577,7 +740,7 @@ teardown() {
 }
 
 @test "run_stage logs complexity hint when provided" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -612,6 +775,7 @@ teardown() {
     result=$(run_stage "test" "prompt" "test-schema.json" | grep '^{')
     [ -n "$result" ] || fail "run_stage returned no JSON output"
 
+    # Envelope-level status: run completed (recovered structured output).
     local status_val
     status_val=$(printf '%s' "$result" | jq -r '.status')
     [ "$status_val" = "success" ] || \
@@ -645,13 +809,15 @@ teardown() {
 	result=$(run_stage "test" "prompt" "test-schema.json" | grep '^{')
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
+	# Envelope-level status: run completed via .result-text fallback.
 	local status_val
 	status_val=$(printf '%s' "$result" | jq -r '.status')
 	[ "$status_val" = "success" ] || \
 		fail "Expected status=success, got: $status_val (result: $result)"
 
+	# Agent-reported summary lives under .output.summary in the envelope.
 	local summary_val
-	summary_val=$(printf '%s' "$result" | jq -r '.summary')
+	summary_val=$(printf '%s' "$result" | jq -r '.output.summary')
 	[ "$summary_val" = "Summary of work done" ] || \
 		fail "Expected summary='Summary of work done', got: $summary_val"
 
@@ -756,7 +922,7 @@ teardown() {
 @test "run_stage escalates model when output subtype is error_max_turns" {
     # BATS runs each @test in a forked subprocess — re-source model-config to
     # make readonly arrays available (same pattern as MODEL SELECTION tests).
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
     timeout() {
@@ -778,22 +944,22 @@ teardown() {
     export -f timeout
     export counter_file
 
-    # test-iter-1 resolves to haiku; haiku escalates to sonnet on error_max_turns
+    # test-iter-1 resolves to sonnet; sonnet escalates to opus on error_max_turns
     run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
 
     local final_count
     final_count=$(cat "$counter_file")
     (( final_count == 2 )) || fail "Expected 2 claude calls, got $final_count"
 
-    # Second call must use escalated model (sonnet)
+    # Second call must use escalated model (opus — next tier above sonnet)
     local second_call_args
     second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
-    [[ "$second_call_args" == *"--model sonnet"* ]] || \
-        fail "Expected --model sonnet in escalated retry. Args: $second_call_args"
+    [[ "$second_call_args" == *"--model opus"* ]] || \
+        fail "Expected --model opus in escalated retry. Args: $second_call_args"
 }
 
 @test "run_stage fails with max_turns_exhausted_at_ceiling when opus hits error_max_turns" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         # Always return error_max_turns — opus is at ceiling, cannot escalate
@@ -801,15 +967,16 @@ teardown() {
     }
     export -f timeout
 
-    # implement stage resolves to opus (ceiling model)
-    run run_stage "implement-task-1" "prompt" "test-schema.json" "" ""
+    # implement + L complexity resolves to opus, the ceiling model that
+    # cannot escalate further on error_max_turns.
+    run run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
     [ "$status" -eq 1 ]
     [[ "$output" == *"max_turns_exhausted_at_ceiling"* ]] || \
         fail "Expected ceiling error in output. Got: $output"
 }
 
 @test "run_stage does not include max-turns cap on error_max_turns escalation retry" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
     timeout() {
@@ -842,11 +1009,166 @@ teardown() {
 }
 
 # =============================================================================
+# MODEL ESCALATION — structured_error
+# =============================================================================
+
+@test "run_stage escalates when structured_output.status is error without permission_denials" {
+    # BATS runs each @test in a forked subprocess — re-source model-config to
+    # make readonly arrays available (same pattern as MODEL SELECTION tests).
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    # record_escalation needs a minimal status.json to write into.
+    cat > "$STATUS_FILE" << 'EOF'
+{"escalations": [], "stages": {}}
+EOF
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" > "$TEST_TMP/call-$n-args.txt"
+        if (( n == 1 )); then
+            # Structured error with no permission_denials — must escalate
+            echo '{"result":"failed","structured_output":{"status":"error","error":"first attempt failed"}}'
+        else
+            # Escalated call: succeed
+            echo '{"result":"ok","structured_output":{"status":"success","data":"recovered"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file
+
+    # test-iter-1 resolves to sonnet; sonnet escalates to opus on structured_error
+    local result
+    result=$(run_stage "test-iter-1" "prompt" "test-schema.json" "" "" | grep '^{')
+    [ -n "$result" ] || fail "run_stage returned no JSON output"
+
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 2 )) || fail "Expected 2 claude calls (original + escalated), got $final_count"
+
+    # Second call must use escalated model (opus — next tier above sonnet)
+    local second_call_args
+    second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
+    [[ "$second_call_args" == *"--model opus"* ]] || \
+        fail "Expected --model opus in escalated retry. Args: $second_call_args"
+
+    # Final envelope status must reflect the successful escalated run.
+    # Both envelope .status and agent .output.status are "success" here
+    # because the escalated agent returned status:"success".
+    local status_val
+    status_val=$(printf '%s' "$result" | jq -r '.status')
+    [ "$status_val" = "success" ] || \
+        fail "Expected 'success' after escalation, got: $status_val"
+
+    local agent_status
+    agent_status=$(printf '%s' "$result" | jq -r '.output.status')
+    [ "$agent_status" = "success" ] || \
+        fail "Expected output.status='success' after escalation, got: $agent_status"
+}
+
+@test "run_stage skips escalation and logs warning when permission_denials is non-empty" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    cat > "$STATUS_FILE" << 'EOF'
+{"escalations": [], "stages": {}}
+EOF
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        # status:error with non-empty permission_denials — escalation must be skipped
+        echo '{"result":"blocked","structured_output":{"status":"error","error":"permission denied"},"permission_denials":[{"tool_name":"Edit"},{"tool_name":"Write"}]}'
+    }
+    export -f timeout
+    export counter_file
+
+    # permission_denied routes to bail (exit 1); capture via `run` so the
+    # expected non-zero status does not trip BATS errexit.
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
+
+    # Only one claude call should have been made — escalation was skipped
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 1 )) || \
+        fail "Expected 1 claude call (escalation skipped), got $final_count"
+
+    # Warning log must name the denied tools and reference the permission hook
+    grep -q "blocked by permission hook" "$LOG_FILE" || \
+        fail "Expected permission-hook warning in log. Log: $(cat "$LOG_FILE")"
+    grep -q "Edit" "$LOG_FILE" || \
+        fail "Expected denied tool 'Edit' named in warning. Log: $(cat "$LOG_FILE")"
+    grep -q "Write" "$LOG_FILE" || \
+        fail "Expected denied tool 'Write' named in warning. Log: $(cat "$LOG_FILE")"
+
+    # No escalation should have been recorded
+    local escalation_count
+    escalation_count=$(jq '.escalations | length' "$STATUS_FILE")
+    [ "$escalation_count" = "0" ] || \
+        fail "Expected 0 escalations recorded, got: $escalation_count"
+}
+
+@test "run_stage records structured_error escalation with reason 'structured_error'" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    cat > "$STATUS_FILE" << 'EOF'
+{"escalations": [], "stages": {}}
+EOF
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"result":"failed","structured_output":{"status":"error","error":"first attempt failed"}}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file
+
+    run_stage "test-iter-1" "prompt" "test-schema.json" "" "" >/dev/null 2>/dev/null
+
+    local reason
+    reason=$(jq -r '.escalations[0].reason // empty' "$STATUS_FILE")
+    [[ "$reason" == *"structured_error"* ]] || \
+        fail "Expected escalation reason to contain 'structured_error', got: $reason (status.json: $(cat "$STATUS_FILE"))"
+
+    # Escalation metadata should reflect sonnet → opus transition
+    local from_model
+    from_model=$(jq -r '.escalations[0].from_model // empty' "$STATUS_FILE")
+    [[ "$from_model" == *"sonnet"* ]] || \
+        fail "Expected from_model to contain 'sonnet', got: $from_model"
+
+    local to_model
+    to_model=$(jq -r '.escalations[0].to_model // empty' "$STATUS_FILE")
+    [[ "$to_model" == *"opus"* ]] || \
+        fail "Expected to_model to contain 'opus', got: $to_model"
+}
+
+# =============================================================================
 # COMPLEXITY-AWARE MAX-TURNS LOGIC
 # =============================================================================
 
 @test "run_stage passes --max-turns 40 to sonnet with M-complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -863,7 +1185,7 @@ teardown() {
 }
 
 @test "run_stage passes --max-turns 40 to sonnet with L-complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -881,7 +1203,7 @@ teardown() {
 }
 
 @test "run_stage passes --max-turns 25 to sonnet with S-complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -899,7 +1221,7 @@ teardown() {
 }
 
 @test "run_stage passes --max-turns 25 to sonnet with empty complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -917,7 +1239,7 @@ teardown() {
 }
 
 @test "run_stage passes --max-turns 10 to haiku for light-tier stage" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -934,8 +1256,8 @@ teardown() {
         fail "Expected --max-turns 10 for haiku light-tier stage. Calls: $(cat "$claude_calls")"
 }
 
-@test "run_stage passes --max-turns 15 to haiku via S-complexity override" {
-    source "$TEST_TMP/model-config.sh"
+@test "run_stage passes --max-turns 15 to haiku on a non-light stage" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -944,16 +1266,18 @@ teardown() {
     }
     export -f timeout
 
-    # implement-task-1 with S-complexity resolves to haiku via override
-    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S"
+    # implement is a standard-tier stage; forcing it to haiku via the model
+    # override exercises the "haiku but not inherently light" cap of 15 turns
+    # (distinct from the 10-turn cap for inherently light stages).
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "" "" "haiku"
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--max-turns 15" "$claude_calls" || \
-        fail "Expected --max-turns 15 for haiku via complexity override. Calls: $(cat "$claude_calls")"
+        fail "Expected --max-turns 15 for haiku on a non-light stage. Calls: $(cat "$claude_calls")"
 }
 
 @test "run_stage logs max-turns value for sonnet with M-complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -967,7 +1291,7 @@ teardown() {
 }
 
 @test "run_stage logs max-turns value for sonnet with S-complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -979,4 +1303,943 @@ teardown() {
 
     grep -q "Max turns: 25 (sonnet with S/empty complexity)" "$LOG_FILE" || \
         fail "Max turns logging not found in log. Log: $(cat "$LOG_FILE")"
+}
+
+# -----------------------------------------------------------------------------
+# pr / pr-review budgets are intentionally unchanged by the stage-type-aware
+# override — verify they still get their original caps (10 / 10) and that the
+# new MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW env vars do not affect them.
+# -----------------------------------------------------------------------------
+
+@test "run_stage passes --max-turns 10 to pr stage (unchanged)" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # pr is the exact match — PR creation budget is 10 turns (includes rebase headroom)
+    run_stage "pr" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 10" "$claude_calls" || \
+        fail "Expected --max-turns 10 for pr stage. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage logs pr stage max-turns at default value (10)" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "pr" "prompt" "test-schema.json" "" ""
+
+    grep -q "Max turns: 10 (PR creation" "$LOG_FILE" || \
+        fail "Expected PR creation max-turns log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage honours MAX_TURNS_PR env var for pr stage" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_PR=8
+
+    run_stage "pr" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_PR
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 8" "$claude_calls" || \
+        fail "Expected --max-turns 8 when MAX_TURNS_PR=8. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage MAX_TURNS_PR is independent of MAX_TURNS_SIMPLIFY" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_PR=8
+    export MAX_TURNS_SIMPLIFY=3
+
+    run_stage "pr" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_PR MAX_TURNS_SIMPLIFY
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 8" "$claude_calls" || \
+        fail "Expected --max-turns 8 (MAX_TURNS_PR=8 with MAX_TURNS_SIMPLIFY=3). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 3" "$claude_calls" && \
+        fail "pr stage must not be affected by MAX_TURNS_SIMPLIFY" || true
+}
+
+@test "run_stage passes --max-turns 10 to pr-review stage (unchanged)" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # pr-review matches the "pr-review" prefix — focused diff analysis = 10 turns
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 10" "$claude_calls" || \
+        fail "Expected --max-turns 10 for pr-review stage. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage logs pr-review stage max-turns at original value (10)" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    grep -q "Max turns: 10 (PR review" "$LOG_FILE" || \
+        fail "Expected PR review max-turns log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage pr budget ignores MAX_TURNS_SIMPLIFY env var" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_SIMPLIFY=99
+
+    run_stage "pr" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_SIMPLIFY
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 10" "$claude_calls" || \
+        fail "Expected --max-turns 10 (pr unchanged by MAX_TURNS_SIMPLIFY). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 99" "$claude_calls" && \
+        fail "pr should not honour MAX_TURNS_SIMPLIFY" || true
+}
+
+@test "run_stage pr-review budget ignores MAX_TURNS_FIX_REVIEW env var" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_FIX_REVIEW=99
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_FIX_REVIEW
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 10" "$claude_calls" || \
+        fail "Expected --max-turns 10 (pr-review unchanged by MAX_TURNS_FIX_REVIEW). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 99" "$claude_calls" && \
+        fail "pr-review should not honour MAX_TURNS_FIX_REVIEW" || true
+}
+
+# =============================================================================
+# STAGE-TYPE-AWARE MAX-TURNS OVERRIDES (simplify + fix/fix-review-*)
+# =============================================================================
+
+@test "run_stage passes --max-turns 15 to haiku for simplify stage (default)" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # simplify is a light-tier stage — resolves to haiku
+    run_stage "simplify-task-1-iter-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 15" "$claude_calls" || \
+        fail "Expected --max-turns 15 for simplify haiku. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage respects MAX_TURNS_SIMPLIFY env var for simplify stage" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_SIMPLIFY=8
+
+    run_stage "simplify-task-1-iter-1" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_SIMPLIFY
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 8" "$claude_calls" || \
+        fail "Expected --max-turns 8 (MAX_TURNS_SIMPLIFY=8). Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage uses default --max-turns 15 for simplify when MAX_TURNS_SIMPLIFY is unset" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    unset MAX_TURNS_SIMPLIFY
+
+    run_stage "simplify-task-1-iter-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 15" "$claude_calls" || \
+        fail "Expected default --max-turns 15 when MAX_TURNS_SIMPLIFY is unset. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage logs simplify haiku cap with env var name" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "simplify-task-1-iter-1" "prompt" "test-schema.json" "" ""
+
+    grep -q "MAX_TURNS_SIMPLIFY" "$LOG_FILE" || \
+        fail "Expected MAX_TURNS_SIMPLIFY in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage passes --max-turns 30 to sonnet for fix stage (default)" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # fix is standard tier — resolves to sonnet; model_override ensures sonnet
+    run_stage "fix-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 30" "$claude_calls" || \
+        fail "Expected --max-turns 30 for fix sonnet. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage passes --max-turns 30 to sonnet for fix-review stage (default)" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # fix-review-* matches the "fix" prefix; model_override ensures sonnet
+    run_stage "fix-review-task-1-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 30" "$claude_calls" || \
+        fail "Expected --max-turns 30 for fix-review sonnet. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage respects MAX_TURNS_FIX_REVIEW env var for fix stage" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_FIX_REVIEW=15
+
+    run_stage "fix-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    unset MAX_TURNS_FIX_REVIEW
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 15" "$claude_calls" || \
+        fail "Expected --max-turns 15 (MAX_TURNS_FIX_REVIEW=15). Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage logs fix sonnet cap with env var name" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "fix-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    grep -q "MAX_TURNS_FIX_REVIEW" "$LOG_FILE" || \
+        fail "Expected MAX_TURNS_FIX_REVIEW in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage respects MAX_TURNS_FIX_REVIEW env var for fix-review stage" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_FIX_REVIEW=15
+
+    run_stage "fix-review-task-1-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    unset MAX_TURNS_FIX_REVIEW
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 15" "$claude_calls" || \
+        fail "Expected --max-turns 15 (MAX_TURNS_FIX_REVIEW=15 for fix-review). Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage uses default --max-turns 30 for fix-review when MAX_TURNS_FIX_REVIEW is unset" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    unset MAX_TURNS_FIX_REVIEW
+
+    run_stage "fix-review-task-1-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 30" "$claude_calls" || \
+        fail "Expected default --max-turns 30 when MAX_TURNS_FIX_REVIEW is unset. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage does not apply simplify cap when model is not haiku" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # simplify with model_override=sonnet must NOT get the 15-turn simplify cap
+    run_stage "simplify-task-1-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 15" "$claude_calls" && \
+        fail "Should not apply --max-turns 15 simplify cap when model is sonnet" || true
+}
+
+@test "run_stage does not apply fix cap when model is not sonnet" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # fix with model_override=opus must NOT get the 30-turn fix cap
+    run_stage "fix-iter-1" "prompt" "test-schema.json" "" "" "" "opus"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 30" "$claude_calls" && \
+        fail "Should not apply --max-turns 30 fix cap when model is opus" || true
+}
+
+# =============================================================================
+# _APPLY_STAGE_ACTION — STAGE_RESULT ENVELOPE SHAPE
+#
+# The same 4 escalation behaviors (max_turns, timeout, empty, structured-error)
+# expressed via the stage_result + _apply_stage_action interface
+# (issue #178 PR-A, task 4). No behavior change — these tests verify the new
+# dispatch surface is consistent with the run_stage test assertions above.
+#
+# Convention: bail exits 1 and emits the envelope; accept/escalate/retry_same
+# exit 0 and emit the envelope.  The error_kind field in the envelope
+# identifies which escalation path triggered the bail/escalate decision.
+# =============================================================================
+
+@test "_apply_stage_action: bail exits 1 and preserves error_kind for max_turns_exhausted_at_ceiling" {
+	# max_turns behavior: run_stage calls _apply_stage_action with bail when
+	# opus (ceiling) hits error_max_turns. The envelope must survive intact so
+	# callers can inspect error_kind without re-running the stage.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "{\"subtype\":\"error_max_turns\"}",
+		denials: [],
+		model: "opus",
+		error_kind: "max_turns_exhausted_at_ceiling",
+		elapsed_ms: 5000
+	}')
+
+	run _apply_stage_action "$stage_result" "bail" "max_turns_exhausted_at_ceiling"
+	[ "$status" -eq 1 ]
+
+	# Envelope must be emitted on stdout so callers can inspect error_kind.
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action bail must emit stage_result on stdout"
+
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "max_turns_exhausted_at_ceiling" ] || \
+		fail "Expected error_kind=max_turns_exhausted_at_ceiling, got: $error_kind"
+
+	local envelope_status
+	envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+	[ "$envelope_status" = "error" ] || \
+		fail "Expected envelope status=error, got: $envelope_status"
+}
+
+@test "_apply_stage_action: bail exits 1 and preserves error_kind for timeout" {
+	# timeout behavior: run_stage calls _apply_stage_action with bail when
+	# both initial attempt and retry time out at the ceiling model.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "",
+		denials: [],
+		model: "opus",
+		error_kind: "timeout",
+		elapsed_ms: 60000
+	}')
+
+	run _apply_stage_action "$stage_result" "bail" "timeout"
+	[ "$status" -eq 1 ]
+
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action bail must emit stage_result on stdout"
+
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "timeout" ] || \
+		fail "Expected error_kind=timeout, got: $error_kind"
+
+	local envelope_status
+	envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+	[ "$envelope_status" = "error" ] || \
+		fail "Expected envelope status=error, got: $envelope_status"
+}
+
+@test "_apply_stage_action: bail exits 1 and preserves error_kind for no_structured_output" {
+	# empty behavior: run_stage calls _apply_stage_action with bail when no
+	# structured output can be extracted even after escalation attempts.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "{\"result\":\"some text\",\"is_error\":true}",
+		denials: [],
+		model: "sonnet",
+		error_kind: "no_structured_output",
+		elapsed_ms: 10000
+	}')
+
+	run _apply_stage_action "$stage_result" "bail" "no_structured_output"
+	[ "$status" -eq 1 ]
+
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action bail must emit stage_result on stdout"
+
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "no_structured_output" ] || \
+		fail "Expected error_kind=no_structured_output, got: $error_kind"
+
+	local envelope_status
+	envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+	[ "$envelope_status" = "error" ] || \
+		fail "Expected envelope status=error, got: $envelope_status"
+}
+
+@test "_apply_stage_action: escalate exits 0 and emits envelope for structured_error" {
+	# structured-error behavior: run_stage calls _apply_stage_action with
+	# escalate when the agent returned status:error without permission_denials.
+	# The shim emits the envelope and exits 0; the re-run lives in run_stage
+	# (PR-A pass-through; PR-B will invoke escalation-policy skill here).
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: {status: "error", error: "first attempt failed"},
+		raw: "{\"structured_output\":{\"status\":\"error\"}}",
+		denials: [],
+		model: "haiku",
+		error_kind: null,
+		elapsed_ms: 3000
+	}')
+
+	run _apply_stage_action "$stage_result" "escalate" "structured_error"
+	[ "$status" -eq 0 ]
+
+	# Envelope must be emitted so callers can inspect output.status.
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action escalate must emit stage_result on stdout"
+
+	# The structured error's .output.status must survive in the emitted envelope
+	# so the caller (run_stage / future PR-B skill) can act on the original result.
+	local agent_status
+	agent_status=$(printf '%s' "$emitted_envelope" | jq -r '.output.status // empty')
+	[ "$agent_status" = "error" ] || \
+		fail "Expected output.status=error in emitted envelope, got: $agent_status"
+}
+
+@test "_apply_stage_action: retry_same exits 0 and emits stage_result envelope unchanged" {
+	# retry_same behavior: run_stage calls _apply_stage_action with retry_same
+	# for rate-limit scenarios. The shim must emit the envelope and return 0 so
+	# the caller can re-issue the stage; the envelope must survive intact.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "{\"result\":\"rate limited\",\"is_error\":true}",
+		denials: [],
+		model: "sonnet",
+		error_kind: "rate_limit",
+		elapsed_ms: 2000
+	}')
+
+	run _apply_stage_action "$stage_result" "retry_same" "rate_limit"
+	[ "$status" -eq 0 ]
+
+	# Envelope must be emitted on stdout so callers can inspect stage_result.
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action retry_same must emit stage_result on stdout"
+
+	# The error_kind must survive unchanged so the caller knows why retry was
+	# requested (PR-B will use this to drive the retry decision).
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "rate_limit" ] || \
+		fail "Expected error_kind=rate_limit in emitted envelope, got: $error_kind"
+}
+
+# =============================================================================
+# TASK-EXTRACTION AWK — DEPTH-AGNOSTIC HEADING ACCEPTANCE
+#
+# The inline awk in main()'s parse_issue stage must accept any ATX heading
+# depth (## and ###) for the Implementation Tasks section, mirroring the
+# depth-agnostic behaviour of _issue_body_parse_tasks in issue-body-lib.sh.
+# Fixed depth-agnostic pattern: /^##+[[:space:]]+Implementation Tasks/
+# =============================================================================
+
+@test "task-extraction awk: ##-headed body yields non-empty tasks_section" {
+	local body
+	body=$(printf '%s\n' \
+		'## Implementation Tasks' \
+		'' \
+		'- [ ] `[bash-script-craftsman]` Task one')
+
+	local tasks_section
+	tasks_section=$(printf '%s' "$body" \
+		| awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} \
+			found && /^##+[[:space:]]/{exit} found{print}')
+
+	[[ -n "$tasks_section" ]] || \
+		fail "##-headed body must yield non-empty tasks_section"
+}
+
+@test "task-extraction awk: ###-headed body yields non-empty tasks_section" {
+	local body
+	body=$(printf '%s\n' \
+		'### Implementation Tasks' \
+		'' \
+		'- [ ] `[bash-script-craftsman]` Task one')
+
+	local tasks_section
+	tasks_section=$(printf '%s' "$body" \
+		| awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} \
+			found && /^##+[[:space:]]/{exit} found{print}')
+
+	[[ -n "$tasks_section" ]] || \
+		fail "###-headed body must yield non-empty tasks_section"
+}
+
+@test "task-extraction awk: ###-headed section ends at next heading" {
+	# Section extraction must stop at the next ## or deeper heading so that
+	# content from Acceptance Criteria and similar sections is not mistaken
+	# for task lines.
+	local body
+	body=$(printf '%s\n' \
+		'### Implementation Tasks' \
+		'' \
+		'- [ ] `[bash-script-craftsman]` Task one' \
+		'' \
+		'## Acceptance Criteria' \
+		'' \
+		'- [ ] All tasks complete')
+
+	local tasks_section
+	tasks_section=$(printf '%s' "$body" \
+		| awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} \
+			found && /^##+[[:space:]]/{exit} found{print}')
+
+	[[ "$tasks_section" != *"All tasks complete"* ]] || \
+		fail "Section extraction must stop at next heading"
+	[[ "$tasks_section" == *"Task one"* ]] || \
+		fail "tasks_section must contain task lines before the boundary"
+}
+
+# =============================================================================
+# VALIDATE_PLAN GREP — DEPTH-AGNOSTIC HEADING ACCEPTANCE
+#
+# The validate_plan stage grep gate must accept any ATX heading depth
+# (## and ###) for the Implementation Tasks section.
+# Fixed depth-agnostic pattern: grep -qE '^##+[[:space:]]+Implementation Tasks'
+# =============================================================================
+
+@test "validate_plan grep: ##-headed body file passes section check" {
+	local issue_body_file="$TEST_TMP/issue-body.md"
+	printf '%s\n' \
+		'## Implementation Tasks' \
+		'' \
+		'- [ ] `[bash-script-craftsman]` Task one' \
+		> "$issue_body_file"
+
+	grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file" || \
+		fail "validate_plan grep must accept ##-headed Implementation Tasks"
+}
+
+@test "validate_plan grep: ###-headed body file passes section check" {
+	local issue_body_file="$TEST_TMP/issue-body.md"
+	printf '%s\n' \
+		'### Implementation Tasks' \
+		'' \
+		'- [ ] `[bash-script-craftsman]` Task one' \
+		> "$issue_body_file"
+
+	grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file" || \
+		fail "validate_plan grep must accept ###-headed Implementation Tasks"
+}
+
+# =============================================================================
+# GET_STAGE_TIMEOUT — test-iter
+# =============================================================================
+
+@test "get_stage_timeout returns 1500 for 'test-iter'" {
+	local result
+	result=$(get_stage_timeout "test-iter")
+	[ "$result" -eq 1500 ] || \
+		fail "Expected 1500 for test-iter, got: $result"
+}
+
+@test "get_stage_timeout returns 1500 for 'test-iter-1' (glob match)" {
+	local result
+	result=$(get_stage_timeout "test-iter-1")
+	[ "$result" -eq 1500 ] || \
+		fail "Expected 1500 for test-iter-1, got: $result"
+}
+
+@test "get_stage_timeout returns 1500 for 'test-iter-2' (glob match)" {
+	local result
+	result=$(get_stage_timeout "test-iter-2")
+	[ "$result" -eq 1500 ] || \
+		fail "Expected 1500 for test-iter-2, got: $result"
+}
+
+@test "calc_test_loop_budget derives from the raised test-iter timeout" {
+	# Budget = get_stage_timeout("test-iter") × max(planned,1) + slack.
+	# With the raised 1500s timeout the budget must widen accordingly.
+	local result
+	TEST_LOOP_WALL_BUDGET="" \
+		TEST_LOOP_PLANNED_ITERATIONS=2 \
+		TEST_ITER_WALL_TIME_SLACK=300 \
+		result=$(calc_test_loop_budget)
+	[ "$result" -eq 3300 ] || \
+		fail "Expected 1500*2+300=3300, got: $result"
+}
+
+# =============================================================================
+# _BUILD_BASH_TEST_COMMAND — parallelized bats with tests/*.bats
+# =============================================================================
+
+@test "_build_bash_test_command emits --jobs in tests/*.bats suffix when parallel available" {
+	# Mock bats with --jobs support
+	cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+	printf '%s\n' "Usage: bats [OPTIONS] <tests>" \
+		"  -j, --jobs <jobs>  Number of parallel jobs"
+	exit 0
+fi
+exit 0
+EOF
+	chmod +x "$TEST_TMP/bin/bats"
+
+	# Mock parallel backend so the --jobs guard passes
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/bin/parallel"
+	chmod +x "$TEST_TMP/bin/parallel"
+
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/foo.bats"
+
+	local result
+	result=$(_build_bash_test_command "$TEST_TMP")
+	[[ "$result" == *" --jobs "* ]] || \
+		fail "Expected '--jobs' in tests/*.bats suffix. Got: $result"
+	[[ "$result" == *" tests/"*".bats" ]] || \
+		fail "Expected 'tests/*.bats' in command. Got: $result"
+}
+
+@test "_build_bash_test_command tests/*.bats suffix omits --jobs when parallel unavailable" {
+	# This test asserts the serial fallback when no parallel backend
+	# exists. A host-installed parallel/rush (outside the mock bin)
+	# would satisfy the guard and invalidate the assertion, so skip.
+	if command -v parallel > /dev/null 2>&1 \
+		|| command -v rush > /dev/null 2>&1; then
+		skip "host has a parallel backend; serial fallback untestable"
+	fi
+
+	# Mock bats with --jobs support but no parallel/rush binary
+	cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+	printf '%s\n' "Usage: bats [OPTIONS] <tests>" \
+		"  -j, --jobs <jobs>  Number of parallel jobs"
+	exit 0
+fi
+exit 0
+EOF
+	chmod +x "$TEST_TMP/bin/bats"
+
+	# Ensure parallel and rush are absent from PATH
+	rm -f "$TEST_TMP/bin/parallel" "$TEST_TMP/bin/rush"
+
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/foo.bats"
+
+	local result
+	result=$(_build_bash_test_command "$TEST_TMP")
+	[[ "$result" != *" --jobs "* ]] || \
+		fail "Should not include --jobs when no parallel backend. Got: $result"
+	[[ "$result" == *" tests/"*".bats" ]] || \
+		fail "Expected 'tests/*.bats' in command. Got: $result"
+}
+
+# =============================================================================
+# NON-BLOCKING FULL-SUITE BATS CHECK — non-bash scope → degraded signal
+#
+# The smart-targeted test loop only runs the pipeline's own *.bats suite when
+# change_scope == "bash"; typescript/ts-frontend/mixed scopes run Jest and
+# never execute it. To stop infra-test regressions (e.g. a long-red
+# test-verdict-parsing.bats, #17/#524) from hiding, main() runs an
+# informational, NON-BLOCKING full-suite BATS check via run-tests.sh for every
+# non-`bash` scope and, on a red suite, records the degraded-stage signal
+# `test:bats_full_suite_red` in DEGRADED_STAGES — mirroring the existing Jest
+# full-suite check at L7441-7465.
+#
+# These tests pin that contract:
+#   - static: the orchestrator wires the degraded signal into DEGRADED_STAGES
+#     and gates the check to non-`bash` scopes (binds to the real source).
+#   - functional: a non-`bash` scope with a red suite records the signal and
+#     writes it to status.json, while `bash` scope and a green suite do not.
+#
+# The functional tests reproduce main()'s inline block (it is not a callable
+# function) — the same pattern used by the deploy-verify degraded-flag tests in
+# test-deploy-verify.bats.
+# =============================================================================
+
+# Faithful reproduction of main()'s non-blocking full-suite BATS check
+# (issue #524). Runs the full bats suite for every non-`bash` scope; on a
+# non-zero run it appends the degraded-stage signal. Never returns non-zero —
+# the check is informational and must not halt the pipeline.
+_repro_full_suite_bats_check() {
+	local scope="$1"
+	local run_tests_cmd="$2"
+	[[ "$scope" == "bash" ]] && return 0
+	eval "$run_tests_cmd" > /dev/null 2>&1 \
+		|| DEGRADED_STAGES+=("test:bats_full_suite_red")
+	return 0
+}
+
+@test "full-suite BATS check records test:bats_full_suite_red in DEGRADED_STAGES" {
+	# Static: the orchestrator must wire the degraded-stage signal for the
+	# non-blocking full-suite BATS check into DEGRADED_STAGES (issue #524).
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	[[ "$script_content" == *'DEGRADED_STAGES+=("test:bats_full_suite_red")'* ]] || \
+		fail "Orchestrator must append test:bats_full_suite_red to DEGRADED_STAGES on a red full-suite BATS run"
+}
+
+@test "full-suite BATS check is gated to non-bash scope and runs the full bats suite" {
+	# Static: the degraded-signal block must be reachable only for non-`bash`
+	# scopes (so typescript/ts-frontend/mixed trigger it) and must run the full
+	# suite via run-tests.sh — mirroring the Jest full-suite check.
+	local window
+	local marker_line
+	local start_line
+	marker_line=$(awk '/test:bats_full_suite_red/{print NR; exit}' \
+		"$ORCHESTRATOR_SCRIPT")
+	start_line=$(( marker_line > 200 ? marker_line - 200 : 1 ))
+	window=$(awk -v s="$start_line" -v e="$marker_line" \
+		'NR >= s && NR <= e' "$ORCHESTRATOR_SCRIPT")
+	[ -n "$window" ] || fail "Could not locate the full-suite BATS check block"
+	[[ "$window" == *scope* ]] || \
+		fail "Full-suite BATS check must be gated on branch scope. Window: $window"
+	[[ "$window" == *bash* ]] || \
+		fail "Full-suite BATS check must exclude the bash scope. Window: $window"
+	[[ "$window" == *run-tests.sh* ]] || \
+		fail "Full-suite BATS check must invoke run-tests.sh (full suite). Window: $window"
+}
+
+@test "non-bash scope with a red full-suite BATS run records the degraded signal" {
+	# Functional: a red run-tests.sh on a typescript-scope branch must record
+	# test:bats_full_suite_red without hard-failing (non-blocking), and the flag
+	# must be written through to status.json so the batch summary surfaces it.
+	local -a DEGRADED_STAGES=()
+	local red_suite="$TEST_TMP/run-tests-red.sh"
+	printf '#!/usr/bin/env bash\nexit 1\n' > "$red_suite"
+	chmod +x "$red_suite"
+
+	_repro_full_suite_bats_check "typescript" "bash '$red_suite'"
+	local rc=$?
+
+	# (a) Non-blocking: the check itself must not fail the pipeline.
+	[ "$rc" -eq 0 ] || \
+		fail "Full-suite BATS check must be non-blocking; got rc=$rc"
+
+	# (b) The degraded-stage signal must be recorded in DEGRADED_STAGES.
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_full_suite_red' || \
+		fail "Expected test:bats_full_suite_red in DEGRADED_STAGES; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+
+	# (c) Visibility: the same recording block main() runs must persist the flag
+	# to status.json (.degraded_stages) so it is not silently dropped.
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+	local degraded_json
+	degraded_json=$(printf '%s\n' \
+		"${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| jq -R . | jq -s .)
+	jq --argjson degraded "$degraded_json" \
+		'.degraded_stages = $degraded' "$STATUS_FILE" \
+		> "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+	run jq -r '.degraded_stages[]' "$STATUS_FILE"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"test:bats_full_suite_red"* ]] || \
+		fail "Expected test:bats_full_suite_red in status.json .degraded_stages; got: $output"
+}
+
+@test "mixed scope with a red full-suite BATS run also records the degraded signal" {
+	# Functional: the gate must trigger for every non-`bash` scope, not just
+	# typescript — mixed is another scope that runs Jest, not the bats suite.
+	local -a DEGRADED_STAGES=()
+	local red_suite="$TEST_TMP/run-tests-red.sh"
+	printf '#!/usr/bin/env bash\nexit 1\n' > "$red_suite"
+	chmod +x "$red_suite"
+
+	_repro_full_suite_bats_check "mixed" "bash '$red_suite'"
+
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_full_suite_red' || \
+		fail "mixed scope must trigger the full-suite BATS check; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+@test "bash scope skips the full-suite BATS check (no degraded signal)" {
+	# Functional: the bash scope already runs the full bats suite via the test
+	# loop, so the informational check must NOT run — even with a red suite no
+	# degraded signal should be recorded (avoids double-counting).
+	local -a DEGRADED_STAGES=()
+	local red_suite="$TEST_TMP/run-tests-red.sh"
+	printf '#!/usr/bin/env bash\nexit 1\n' > "$red_suite"
+	chmod +x "$red_suite"
+
+	_repro_full_suite_bats_check "bash" "bash '$red_suite'"
+
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ] || \
+		fail "bash scope must skip the full-suite BATS check; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+@test "non-bash scope with a green full-suite BATS run records no degraded signal" {
+	# Functional: a passing suite must leave DEGRADED_STAGES untouched so green
+	# branches are not falsely flagged.
+	local -a DEGRADED_STAGES=()
+	local green_suite="$TEST_TMP/run-tests-green.sh"
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$green_suite"
+	chmod +x "$green_suite"
+
+	_repro_full_suite_bats_check "typescript" "bash '$green_suite'"
+
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ] || \
+		fail "green full-suite BATS run must not record a degraded signal; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# =============================================================================
+# BLOCKING BATS GATE — bash scope blocks merge on red suite (issue #535)
+#
+# .claude/scripts/ changes route to bash scope via detect_change_scope.
+# run_test_loop's bats_section must be BLOCKING for bash scope so that a
+# failing implement-issue-test suite prevents the PR from merging.
+#
+# Mixed scope keeps the informational-only label so TS-heavy PRs with
+# unrelated bash failures are not incorrectly blocked.
+#
+# These static tests pin the gate contract against the orchestrator source,
+# using the same pattern as the full-suite BATS check tests above.
+# =============================================================================
+
+@test "bash scope bats_section is labelled BLOCKING in orchestrator" {
+	# Static: run_test_loop must produce a blocking bats_section for bash scope.
+	# The orchestrator must contain the BLOCKING label so a red suite fails
+	# the stage rather than being recorded as informational only.
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	[[ "$script_content" == *'PIPELINE BATS TESTS (BLOCKING)'* ]] || \
+		fail "Orchestrator must contain BLOCKING label for bash-scope bats_section"
+}
+
+@test "bash scope bats_section instructs agent to fail stage on BATS failure" {
+	# Static: the bash-scope bats_section must tell the agent that BATS
+	# failures ARE a test failure so the stage does not accept a red suite.
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	[[ "$script_content" == *'BATS failures ARE a test failure'* ]] || \
+		fail "Orchestrator must instruct agent that BATS failures ARE a test failure for bash scope"
+}
+
+@test "mixed scope bats_section remains informational only in orchestrator" {
+	# Static: mixed scope must keep its informational label — making it
+	# blocking would break TS-heavy PRs that have unrelated bash failures.
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	[[ "$script_content" == *'informational only, non-blocking'* ]] || \
+		fail "Orchestrator must retain informational-only label for mixed-scope bats_section"
 }

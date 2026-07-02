@@ -127,6 +127,22 @@ teardown() {
 	[[ -z "$output" ]]
 }
 
+@test "_extract_task_files_from_desc: does NOT match plain word in backticks" {
+	# A bare symbol like \`config\` has no slash and no known extension;
+	# it must not be extracted as a file path after the tightening fix.
+	run _extract_task_files_from_desc "Set the \`config\` option to true"
+	[ "$status" -eq 0 ]
+	[[ -z "$output" ]]
+}
+
+@test "_extract_task_files_from_desc: matches backtick token with known extension" {
+	# A backtick token ending in a known extension qualifies as a file
+	# even when it has no directory component.
+	run _extract_task_files_from_desc "Edit \`handler.sh\` directly"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"handler.sh"* ]]
+}
+
 # =============================================================================
 # compute_task_batches
 # =============================================================================
@@ -168,6 +184,26 @@ teardown() {
 	tasks='[
 		{"id":1,"description":"Update src/shared.ts","agent":"default"},
 		{"id":2,"description":"Also update src/shared.ts","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	[ "$b1" -eq 1 ]
+	[ "$b2" -eq 2 ]
+}
+
+@test "compute_task_batches: conflict grep handles leading-hyphen filename" {
+	cd "$TEST_TMP/repo" || exit 1
+	# A backtick-quoted name ending in a known extension and starting with '-'
+	# gets extracted.  Without a '--' end-of-options guard, grep misinterprets
+	# the name as option flags and the conflict is silently missed — both tasks
+	# end up in batch 1.  With '--', grep finds the literal match and puts the
+	# second task in batch 2.
+	local tasks result b1 b2
+	# Use actual backticks (valid JSON); bash single-quotes pass them literally
+	tasks='[
+		{"id":1,"description":"Update `-build.sh`","agent":"default"},
+		{"id":2,"description":"Also update `-build.sh`","agent":"default"}
 	]'
 	result=$(compute_task_batches "$tasks" main)
 	b1=$(printf '%s' "$result" | jq '.[0].batch')
@@ -232,16 +268,16 @@ teardown() {
 	git checkout -q -b feature/test-wt2 main
 
 	local wt_base="$TEST_TMP/worktrees"
-	create_task_worktree "$wt_base" "feature/test-wt2" "7" \
+	create_task_worktree "$wt_base" "feature/test-wt2" "7" "42" \
 		>/dev/null
 
-	# Branch should exist
-	git rev-parse --verify "wt-task-7" >/dev/null 2>&1
+	# Branch should exist with new naming format wt-i<issue>-t<task>
+	git rev-parse --verify "wt-i42-t7" >/dev/null 2>&1
 	[ $? -eq 0 ]
 
 	# Clean up
 	git worktree remove --force "${wt_base}/task-7" 2>/dev/null || true
-	git branch -D "wt-task-7" 2>/dev/null || true
+	git branch -D "wt-i42-t7" 2>/dev/null || true
 	git checkout -q main
 }
 
@@ -376,8 +412,11 @@ teardown() {
 	mkdir -p "$LOG_BASE/stages"
 
 	# Mock run_stage to return success
+	# run_stage nests structured fields under .output (only .status is lifted
+	# to the top level) — execute_batch_serial reads .output.status /
+	# .output.commit / .output.summary, so the mock must match that envelope.
 	run_stage() {
-		printf '%s' '{"status":"success","commit":"abc123","summary":"done"}'
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"abc123","summary":"done"}}'
 	}
 	# Mock quality-related functions
 	should_run_quality_loop() { return 1; }
@@ -483,8 +522,8 @@ teardown() {
 			"$sha" > "$result_file"
 		return 0
 	}
-	# extract_task_size is called within execute_batch_parallel
-	# (not inside the subshell) so it works without export
+	export -f run_task_in_worktree
+	export -f extract_task_size 2>/dev/null || true
 
 	# Two non-overlapping tasks
 	local tasks result
@@ -540,6 +579,10 @@ _setup_parallel_stage_mocks() {
 	log_warn()  { true; }
 	comment_issue() { true; }
 	verify_on_feature_branch() { return 0; }
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export TEST_E2E_CMD="echo run-e2e"
 	export RESUME_MODE=""
@@ -718,8 +761,11 @@ _setup_parallel_stage_mocks() {
 
 	mkdir -p "$LOG_BASE/stages"
 
+	# run_stage nests structured fields under .output (only .status is lifted
+	# to the top level) — execute_batch_serial reads .output.status /
+	# .output.commit / .output.summary, so the mock must match that envelope.
 	run_stage() {
-		printf '%s' '{"status":"success","commit":"abc123","summary":"done"}'
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"abc123","summary":"done"}}'
 	}
 	should_run_quality_loop() { return 1; }
 	get_max_review_attempts() { printf '%s' "1"; }
@@ -727,6 +773,7 @@ _setup_parallel_stage_mocks() {
 	resolve_model() { printf '%s' "sonnet"; }
 	build_files_block() { printf '\n'; }
 	extract_task_size() { printf '%s' "S"; }
+	classify_e2e_strategy() { printf '%s' "none"; }
 
 	local tasks
 	tasks='[{"id":3,"description":"Do thing","agent":"default"}]'
@@ -774,6 +821,8 @@ _setup_parallel_stage_mocks() {
 			"$sha" > "$result_file"
 	}
 	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
 
 	local tasks
 	tasks='[{"id":8,"description":"Modify src.ts","agent":"default","batch":1}]'
@@ -825,6 +874,8 @@ _setup_parallel_stage_mocks() {
 			"$sha" > "$result_file"
 	}
 	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
 
 	# Two tasks both touching shared.ts will cause a merge conflict
 	# on the second merge.  We run them one at a time in the simplest setup:
@@ -853,6 +904,68 @@ _setup_parallel_stage_mocks() {
 	git branch -D feature/conf-fallback 2>/dev/null || true
 	git branch -D wt-task-10 2>/dev/null || true
 	git branch -D wt-task-11 2>/dev/null || true
+}
+
+@test "execute_batch_parallel: success-reported task with no commit lands in failed (no-op guard)" {
+	cd "$TEST_TMP/repo" || exit 1
+	# Clean slate: drop any residue from a prior run so the result is deterministic.
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/noop-guard 2>/dev/null || true
+	git branch -D wt-task-20 2>/dev/null || true
+	git checkout -q -b feature/noop-guard main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'base\n' > base.ts
+	git add base.ts
+	git commit -q -m "add base"
+
+	# A subagent that claims success but commits NOTHING to its worktree.
+	# Without the no-op guard the empty branch merges as "Already up to date"
+	# and the task is wrongly counted completed.
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		# Intentionally no git commit — branch stays at the feature base.
+		printf '{"status":"success","review_attempts":1,"commit":"none","summary":"claimed done but changed nothing"}' \
+			> "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
+
+	local tasks
+	tasks='[
+		{"id":20,"description":"Should change something","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/noop-guard" "main" \
+		2>/dev/null) || true
+
+	local failed_count completed_count
+	failed_count=$(printf '%s' "$result" | jq '.failed | length' 2>/dev/null)
+	completed_count=$(printf '%s' "$result" | jq '.completed | length' 2>/dev/null)
+
+	# Clean up BEFORE asserting so the assertions are the test's last commands
+	# (bats only fails a test on its final command's exit code — trailing
+	# cleanup would otherwise mask an assertion failure).
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/noop-guard 2>/dev/null || true
+	git branch -D wt-task-20 2>/dev/null || true
+
+	# The no-op task must be classified failed, NOT completed.
+	[[ "$failed_count" -eq 1 ]]
+	[[ "$completed_count" -eq 0 ]]
 }
 
 @test "conflicted tasks from parallel can be re-run serially with same outcome" {
@@ -948,6 +1061,8 @@ _setup_parallel_stage_mocks() {
 		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
 			"$sha" > "$result_file"
 	}
+	export -f run_task_in_worktree
+	export -f extract_task_size
 
 	local par_result
 	par_result=$(execute_batch_parallel 1 \
@@ -1336,9 +1451,14 @@ _setup_parallel_stage_mocks() {
 	}
 	log()                { :; }
 	log_warn()           { :; }
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
-	export -f comment_issue run_stage log log_warn
+	export -f comment_issue run_stage log log_warn rebuild_and_health_check
+	export -f _build_targeted_e2e_cmd
 	export status_calls_file
 
 	# Call the real function with conditions that allow both stages to run
@@ -1398,9 +1518,14 @@ _setup_parallel_stage_mocks() {
 		fi
 	}
 	log_warn() { :; }
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
-	export -f comment_issue run_stage log log_warn
+	export -f comment_issue run_stage log log_warn rebuild_and_health_check
+	export -f _build_targeted_e2e_cmd
 
 	run_parallel_post_task_stages \
 		"main" "frontend" "" "S" 2>/dev/null
@@ -1450,9 +1575,14 @@ _setup_parallel_stage_mocks() {
 	log_warn() {
 		printf 'warned: %s\n' "$1" >> "$status_log"
 	}
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
-	export -f comment_issue run_stage log log_warn
+	export -f comment_issue run_stage log log_warn rebuild_and_health_check
+	export -f _build_targeted_e2e_cmd
 
 	run_parallel_post_task_stages \
 		"main" "frontend" "" "S" 2>/dev/null
@@ -1502,9 +1632,14 @@ _setup_parallel_stage_mocks() {
 		true
 	}
 	log_warn() { :; }
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
-	export -f comment_issue run_stage log log_warn
+	export -f comment_issue run_stage log log_warn rebuild_and_health_check
+	export -f _build_targeted_e2e_cmd
 	export e2e_pid_file acc_pid_file
 
 	run_parallel_post_task_stages \
@@ -1576,6 +1711,15 @@ _setup_parallel_stage_mocks() {
 @test "run_parallel_post_task_stages: e2e and acceptance truly run in parallel (timing)" {
 	cd "$TEST_TMP/repo" || exit 1
 
+	# Add a route file on a new branch so acceptance stage calls run_stage too.
+	# Without this, acceptance short-circuits (no route files) and only e2e sleeps,
+	# making serial vs parallel indistinguishable.
+	git checkout -q -b feature/parallel-timing-test main
+	mkdir -p routes
+	printf 'export const handler = () => {}\n' > routes/api.ts
+	git add routes/api.ts
+	git commit -q -m "add route"
+
 	export TEST_E2E_CMD="true"
 	export BASE_BRANCH=main
 	unset RESUME_MODE
@@ -1592,31 +1736,33 @@ _setup_parallel_stage_mocks() {
 		local stage="$1"
 		local start_ns=$(date +%s%N)
 		printf "stage=%s,start=%s\n" "$stage" "$start_ns" >> "$timing_file"
-		# Simulate 0.1 second work
-		sleep 0.1
+		# Simulate 0.15 second work per stage
+		sleep 0.15
 		printf '{"status":"success","result":"passed","summary":"ok"}'
 	}
 	log()     { :; }
 	log_warn() { :; }
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
-	export -f comment_issue run_stage log log_warn
+	export -f comment_issue run_stage log log_warn rebuild_and_health_check
+	export -f _build_targeted_e2e_cmd
 	export timing_file
 
 	local global_start_ns=$(date +%s%N)
 	run_parallel_post_task_stages \
-		"main" "frontend" "" "S" 2>/dev/null
+		"feature/parallel-timing-test" "frontend" "" "S" 2>/dev/null
 	local global_end_ns=$(date +%s%N)
 	local global_elapsed_ns=$(( global_end_ns - global_start_ns ))
 	local global_elapsed_ms=$(( global_elapsed_ns / 1000000 ))
 
-	[ $? -eq 0 ]
-
-	# If stages ran serially (one after another), total time would be ~200ms
-	# If stages ran in parallel, total time would be ~100ms
-	# Add some buffer for system overhead
-	# Parallel should be much less than serial
-	[[ "$global_elapsed_ms" -lt 180 ]] || {
+	# With both stages sleeping 0.15s in parallel, total time ≈ 150ms + overhead.
+	# If they ran serially, total would be ≈ 300ms + overhead.
+	# Threshold of 400ms: passes parallel (~270ms), fails serial (~500ms).
+	[[ "$global_elapsed_ms" -lt 400 ]] || {
 		echo "Stages appear to have run serially (took ${global_elapsed_ms}ms)"
 		cat "$timing_file"
 		exit 1

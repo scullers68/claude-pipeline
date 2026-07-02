@@ -72,6 +72,8 @@ UNIVERSAL_SKILLS=(
     "complete-summary"
     "test-validation"
     "fix-from-review"
+    "test-discovery"
+    "enrich-issue"
 )
 
 # ---------------------------------------------------------------------------
@@ -153,6 +155,34 @@ sync_skills() {
     done
 }
 
+# Strip <!-- STACK-SPECIFIC: --> from line 1 of consumer agent files.
+# Agents whose first line is already --- are left untouched.
+# HTML comments that appear after line 1 are never removed.
+patch_agents() {
+	local dst="$1"
+	local agents_dir="$dst/agents"
+
+	[[ -d "$agents_dir" ]] || return
+
+	local file first_line tmp
+	local patched=0
+	for file in "$agents_dir"/*.md; do
+		[[ -f "$file" ]] || continue
+		IFS= read -r first_line < "$file"
+		if [[ "$first_line" == '<!-- STACK-SPECIFIC:'* ]]; then
+			tmp=$(mktemp)
+			tail -n +2 "$file" > "$tmp" && mv "$tmp" "$file"
+			echo "  PATCH agents/${file##*/}" \
+				"(stripped STACK-SPECIFIC comment from line 1)"
+			patched=$((patched + 1))
+		fi
+	done
+
+	if [[ "$patched" -eq 0 ]]; then
+		echo "  OK   agents/ (no STACK-SPECIFIC line-1 comments found)"
+	fi
+}
+
 # Diff a directory
 diff_dir() {
     local src="$1" dst="$2" dir="$3"
@@ -190,6 +220,48 @@ diff_file() {
         echo "  DIFF $file"
         diff -u "$src/$file" "$dst/$file" | head -20 | sed 's/^/       /'
     fi
+}
+
+# Register detect-core-edit.sh hook in a project's settings.json if not already present
+register_detect_hook() {
+    local settings_path="$1"
+
+    if [[ ! -f "$settings_path" ]]; then
+        return
+    fi
+
+    # Check if already registered
+    local already
+    already=$(jq -r '
+        .hooks.PostToolUse[]?
+        | select(.matcher == "Edit|Write")
+        | .hooks[]?
+        | select(.command != null)
+        | .command
+        | select(contains("detect-core-edit.sh"))
+    ' "$settings_path" 2>/dev/null)
+
+    if [[ -n "$already" ]]; then
+        return
+    fi
+
+    # Add the hook entry
+    local hook_entry='{"type":"command","command":"\"$CLAUDE_PROJECT_DIR/.claude/skills/pipeline-sync/scripts/detect-core-edit.sh\"","timeout":10}'
+
+    local tmp
+    tmp=$(mktemp)
+    jq --argjson entry "$hook_entry" '
+        .hooks.PostToolUse = [
+            .hooks.PostToolUse[]
+            | if .matcher == "Edit|Write" then
+                .hooks += [$entry]
+              else
+                .
+              end
+        ]
+    ' "$settings_path" > "$tmp" && mv "$tmp" "$settings_path"
+
+    echo "  HOOK detect-core-edit.sh registered in project settings.json"
 }
 
 # Diff universal skills
@@ -265,8 +337,14 @@ case "$COMMAND" in
         echo "Syncing universal skills:"
         sync_skills "$PIPELINE_DIR" "$PROJECT_DIR"
 
+        register_detect_hook "$PROJECT_DIR/settings.json"
+
         echo ""
-        echo "Done. Project-specific files (agents, config, prompts) untouched."
+        echo "Patching consumer agents:"
+        patch_agents "$PROJECT_DIR"
+
+        echo ""
+        echo "Done. Project-specific files (config, prompts) untouched."
         ;;
 
     from)

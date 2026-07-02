@@ -253,6 +253,132 @@ teardown() {
 }
 
 # =============================================================================
+# detect_change_scope() .claude/scripts/ ROUTING
+# These tests verify fix for: .claude/scripts/*.sh and *.bats files must route
+# to has_bash=true, not be silently skipped as "pipeline files".
+# =============================================================================
+
+@test "detect_change_scope returns 'bash' for .claude/scripts/*.sh" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-scripts-sh
+	mkdir -p .claude/scripts
+	printf '#!/usr/bin/env bash\n' > .claude/scripts/my-script.sh
+	git add .claude/scripts/my-script.sh
+	git commit -q -m "add .claude/scripts script"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/scripts/ subdirectory .sh" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-scripts-subdir-sh
+	mkdir -p .claude/scripts/implement-issue-test
+	printf '#!/usr/bin/env bash\n' \
+		> .claude/scripts/implement-issue-test/helper.sh
+	git add .claude/scripts/implement-issue-test/helper.sh
+	git commit -q -m "add nested .claude/scripts script"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/scripts/*.bats" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-scripts-bats
+	mkdir -p .claude/scripts/implement-issue-test
+	printf "@test 'hello' { true; }\n" \
+		> .claude/scripts/implement-issue-test/test-foo.bats
+	git add .claude/scripts/implement-issue-test/test-foo.bats
+	git commit -q -m "add .claude/scripts bats"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/hooks/*.sh files" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-hooks-sh
+	mkdir -p .claude/hooks
+	printf '#!/usr/bin/env bash\n' > .claude/hooks/pre-commit.sh
+	git add .claude/hooks/pre-commit.sh
+	git commit -q -m "add .claude/hooks script"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/config/*.sh files" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-config-sh
+	mkdir -p .claude/config
+	printf '#!/usr/bin/env bash\n' > .claude/config/setup.sh
+	git add .claude/config/setup.sh
+	git commit -q -m "add .claude/config script"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/hooks/hook.sh" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-hooks-hook-sh
+	mkdir -p .claude/hooks
+	printf '#!/usr/bin/env bash\n' > .claude/hooks/hook.sh
+	git add .claude/hooks/hook.sh
+	git commit -q -m "add .claude/hooks/hook.sh"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/config/platform.sh" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-config-platform-sh
+	mkdir -p .claude/config
+	printf '#!/usr/bin/env bash\n' > .claude/config/platform.sh
+	git add .claude/config/platform.sh
+	git commit -q -m "add .claude/config/platform.sh"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/scripts/platform/*.sh" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-platform-sh
+	mkdir -p .claude/scripts/platform
+	printf '#!/usr/bin/env bash\n' > .claude/scripts/platform/foo.sh
+	git add .claude/scripts/platform/foo.sh
+	git commit -q -m "add .claude/scripts/platform script"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/scripts/implement-issue-test/*.bats" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-iit-foo-bats
+	mkdir -p .claude/scripts/implement-issue-test
+	printf "@test 'hello' { true; }\n" \
+		> .claude/scripts/implement-issue-test/foo.bats
+	git add .claude/scripts/implement-issue-test/foo.bats
+	git commit -q -m "add .claude/scripts/implement-issue-test bats"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+# =============================================================================
 # run_test_loop() SMART ROUTING - STRUCTURE TESTS
 # =============================================================================
 
@@ -670,9 +796,9 @@ teardown() {
                 count=$((count + 1))
                 echo "$count" > "$call_count_file"
                 if (( count <= 1 )); then
-                    echo '{"result":"failed","failures":[{"test":"failing.test","message":"PR introduced failure"}],"summary":"1 PR failure","validation_result":"skipped"}'
+                    echo '{"status":"success","output":{"result":"failed","failures":[{"test":"failing.test","message":"PR introduced failure"}],"summary":"1 PR failure","validation_result":"skipped"}}'
                 else
-                    echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
+                    echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}}'
                 fi
                 ;;
             fix-tests-*)
@@ -888,11 +1014,17 @@ teardown() {
         case "$stage_name" in
             test-iter-*)
                 printf '%s' "$prompt" > "$prompt_file"
-                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}'
+                echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}}'
                 ;;
         esac
     }
     export -f run_stage
+
+    # E2E injection now gates on a successful container rebuild — stub it.
+    rebuild_and_health_check() {
+        echo '{"rebuild":"success","health":"healthy","elapsed_secs":1}'
+    }
+    export -f rebuild_and_health_check
 
     comment_issue() { :; }
     export -f comment_issue
@@ -993,11 +1125,17 @@ teardown() {
         case "$stage_name" in
             test-iter-*)
                 printf '%s' "$prompt" > "$prompt_file"
-                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}'
+                echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}}'
                 ;;
         esac
     }
     export -f run_stage
+
+    # E2E injection now gates on a successful container rebuild — stub it.
+    rebuild_and_health_check() {
+        echo '{"rebuild":"success","health":"healthy","elapsed_secs":1}'
+    }
+    export -f rebuild_and_health_check
 
     comment_issue() { :; }
     export -f comment_issue
@@ -1064,7 +1202,7 @@ teardown() {
 # .claude/ PIPELINE FILES EXCLUDED FROM SCOPE (claude-pipeline#41)
 # =============================================================================
 
-@test "detect_change_scope excludes .claude/*.sh from bash scope" {
+@test "detect_change_scope returns 'bash' for .claude/scripts/*.sh files" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-claude-sh
     mkdir -p .claude/scripts
@@ -1074,11 +1212,11 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    # .claude/ shell scripts should NOT trigger bash scope
-    [ "$scope" = "config" ]
+    # .claude/scripts/ shell scripts MUST trigger bash scope (they have bats tests)
+    [ "$scope" = "bash" ]
 }
 
-@test "detect_change_scope excludes .claude/*.bats from bash scope" {
+@test "detect_change_scope returns 'bash' for .claude/ bats files" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-claude-bats
     mkdir -p .claude/scripts/implement-issue-test
@@ -1088,11 +1226,11 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    # .claude/ bats files should NOT trigger bash scope
-    [ "$scope" = "config" ]
+    # ALL bats files MUST trigger bash scope regardless of location
+    [ "$scope" = "bash" ]
 }
 
-@test "detect_change_scope returns 'typescript' when .claude/ and app TS files both change" {
+@test "detect_change_scope returns 'mixed' when .claude/scripts/ and app TS files both change" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-claude-plus-ts
     mkdir -p .claude/scripts
@@ -1103,8 +1241,8 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    # Should be typescript, NOT mixed (because .claude/ bash is excluded)
-    [ "$scope" = "typescript" ]
+    # Should be mixed: .claude/scripts/*.sh triggers bash + app.ts triggers typescript
+    [ "$scope" = "mixed" ]
 }
 
 @test "detect_change_scope still returns 'bash' for non-.claude/ sh files" {
@@ -1372,7 +1510,7 @@ teardown() {
         case "$stage_name" in
             test-iter-*)
                 # Return failed with a PR-introduced failure to trigger fix-tests path
-                echo '{"result":"failed","summary":"1 test failed","failures":[{"test":"app.test.ts > x","error":"Expected 2"}],"validation_result":"skipped","validation_summary":""}'
+                echo '{"status":"success","output":{"result":"failed","summary":"1 test failed","failures":[{"test":"app.test.ts > x","error":"Expected 2"}],"validation_result":"skipped","validation_summary":""}}'
                 ;;
             fix-tests-iter-*)
                 # Capture the complexity arg passed to run_stage
@@ -1416,7 +1554,7 @@ teardown() {
         case "$stage_name" in
             test-iter-*)
                 # Tests passed but validation failed — triggers fix-test-quality path
-                echo '{"result":"passed","summary":"Tests passed","validation_result":"failed","validation_summary":"Missing assertions","validation_issues":"Add assertion coverage"}'
+                echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"failed","validation_summary":"Missing assertions","validation_issues":"Add assertion coverage"}}'
                 ;;
             fix-test-quality-iter-*)
                 # Capture the complexity arg passed to run_stage
@@ -1438,4 +1576,171 @@ teardown() {
     local captured_complexity
     captured_complexity=$(< "$complexity_file")
     [ "$captured_complexity" = "M" ] || fail "Expected complexity 'M' passed to fix-test-quality run_stage, got '$captured_complexity'"
+}
+
+# =============================================================================
+# RTK-REWRITE HOOK BEHAVIORAL TESTS (issue-381)
+# Tests for .claude/hooks/rtk-rewrite.sh — the opt-in RTK command-rewrite hook.
+# Hook contract:
+#   - Reads PreToolUse JSON from stdin: {"tool_name":"Bash","tool_input":{"command":"..."}}
+#   - No-ops (exit 0, empty stdout) when RTK_ENABLED != 1 or rtk binary is absent
+#   - When enabled, rewrites allowlisted commands by prepending "rtk" and outputs
+#     modified tool_input JSON; passes parse-sensitive and non-allowlisted commands
+#     through unchanged (exit 0, empty stdout)
+# =============================================================================
+
+_rtk_hook() {
+    echo "${BATS_TEST_DIRNAME}/../../hooks/rtk-rewrite.sh"
+}
+
+_rtk_bash_input() {
+    local cmd="$1"
+    printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$cmd"
+}
+
+_rtk_mock_bin() {
+    mkdir -p "$TEST_TMP/bin"
+    cat > "$TEST_TMP/bin/rtk" << 'EOF'
+#!/usr/bin/env bash
+echo "rtk-mock: $*"
+EOF
+    chmod +x "$TEST_TMP/bin/rtk"
+}
+
+@test "rtk-rewrite.sh hook file exists" {
+    [[ -f "$(_rtk_hook)" ]]
+}
+
+@test "rtk-rewrite.sh hook is executable" {
+    [[ -x "$(_rtk_hook)" ]]
+}
+
+@test "rtk-rewrite hook no-ops when RTK_ENABLED is unset" {
+    local out exit_code
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+        | env -u RTK_ENABLED bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook no-ops when RTK_ENABLED=0" {
+    local out exit_code
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+        | RTK_ENABLED=0 bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook no-ops when rtk binary absent even if RTK_ENABLED=1" {
+    local out exit_code
+    # Use a PATH that contains no rtk binary
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+        | RTK_ENABLED=1 PATH="/usr/bin:/bin" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook no-ops for non-Bash tool calls" {
+    _rtk_mock_bin
+    local out exit_code
+    out=$(printf '{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook rewrites 'git status' when enabled and rtk present" {
+    _rtk_mock_bin
+    local out
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ "$out" == *"rtk git status"* ]]
+}
+
+@test "rtk-rewrite hook rewrites 'git diff' when enabled and rtk present" {
+    _rtk_mock_bin
+    local out
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git diff HEAD"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ "$out" == *"rtk git diff"* ]]
+}
+
+@test "rtk-rewrite hook rewrites 'ls' when enabled and rtk present" {
+    _rtk_mock_bin
+    local out
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ "$out" == *"rtk ls"* ]]
+}
+
+@test "rtk-rewrite hook rewrites 'grep' when enabled and rtk present" {
+    _rtk_mock_bin
+    local out
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"grep -r pattern src/"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ "$out" == *"rtk grep"* ]]
+}
+
+@test "rtk-rewrite hook rewrites 'find' when enabled and rtk present" {
+    _rtk_mock_bin
+    local out
+    # Use printf '%s' so the embedded \" escapes survive as literal backslash-quote
+    # (a format-string printf drops them, yielding invalid JSON the hook rejects).
+    out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"find . -name \"*.ts\""}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ "$out" == *"rtk find"* ]]
+}
+
+@test "rtk-rewrite hook passes through non-allowlisted commands unchanged" {
+    _rtk_mock_bin
+    local out exit_code
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"npm run build"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook passes through commands piped to jq (parse-sensitive)" {
+    _rtk_mock_bin
+    local out exit_code
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status | jq ."}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook passes through commands piped to gh (parse-sensitive)" {
+    _rtk_mock_bin
+    local out exit_code
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git log | gh api /repos"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook outputs valid JSON when rewriting a command" {
+    _rtk_mock_bin
+    local out
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ -n "$out" ]]
+    # Output must be valid JSON parseable by python3 or jq
+    if command -v python3 &>/dev/null; then
+        python3 -c "import json,sys; json.loads(sys.stdin.read())" <<< "$out"
+    elif command -v jq &>/dev/null; then
+        jq . <<< "$out" > /dev/null
+    fi
 }

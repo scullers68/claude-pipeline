@@ -323,18 +323,21 @@ teardown() {
 # is_stage_timeout() — timeout detection helper
 # =============================================================================
 
+# is_stage_timeout consumes the stage_result envelope (issue #178 PR-A).
+# Envelope shape: {status, output, raw, denials, model, error_kind, elapsed_ms}.
+# Timeout is signalled by status=="error" AND error_kind=="timeout".
 @test "is_stage_timeout returns 0 (true) for timeout error JSON" {
-    run is_stage_timeout '{"status":"error","error":"timeout"}'
+    run is_stage_timeout '{"status":"error","output":null,"error_kind":"timeout"}'
     [ "$status" -eq 0 ]
 }
 
 @test "is_stage_timeout returns 1 (false) for successful result" {
-    run is_stage_timeout '{"status":"success","result":"passed","summary":"All tests passed"}'
+    run is_stage_timeout '{"status":"success","output":{"result":"passed","summary":"All tests passed"},"error_kind":null}'
     [ "$status" -eq 1 ]
 }
 
 @test "is_stage_timeout returns 1 (false) for non-timeout error" {
-    run is_stage_timeout '{"status":"error","error":"no structured output"}'
+    run is_stage_timeout '{"status":"error","output":null,"error_kind":"no_structured_output"}'
     [ "$status" -eq 1 ]
 }
 
@@ -344,7 +347,213 @@ teardown() {
 }
 
 @test "is_stage_timeout returns 1 (false) for schema-not-found error" {
-    run is_stage_timeout '{"status":"error","error":"schema not found"}'
+    run is_stage_timeout '{"status":"error","output":null,"error_kind":"schema_not_found"}'
     [ "$status" -eq 1 ]
+}
+
+# =============================================================================
+# _build_bash_test_command() — bash_test_command construction
+# =============================================================================
+
+@test "_build_bash_test_command uses run-tests.sh when it exists" {
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = "bash .claude/scripts/implement-issue-test/run-tests.sh" ]
+}
+
+@test "_build_bash_test_command falls back to bats glob when run-tests.sh absent" {
+    # Mock bats without --jobs support to test serial fallback
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--help" ]] && { printf 'Usage: bats [OPTIONS] <tests>\n'; exit 0; }
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = "bats .claude/scripts/implement-issue-test/*.bats" ]
+}
+
+@test "_build_bash_test_command includes tests/*.bats suffix when tests dir has bats files" {
+    # Mock bats without --jobs support to test serial fallback
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--help" ]] && { printf 'Usage: bats [OPTIONS] <tests>\n'; exit 0; }
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/foo.bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [[ "$result" == *"&& bats tests/*.bats" ]]
+}
+
+@test "_build_bash_test_command does not include tests/*.bats when tests dir is absent" {
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [[ "$result" != *"&& bats tests/*.bats"* ]]
+}
+
+@test "_build_bash_test_command does not include tests/*.bats when tests dir exists but holds no bats files" {
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/helper.sh"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [[ "$result" != *"&& bats tests/*.bats"* ]]
+}
+
+@test "_build_bash_test_command produces full expected string with run-tests.sh and tests dir" {
+    # Mock bats without --jobs support to test serial fallback
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--help" ]] && { printf 'Usage: bats [OPTIONS] <tests>\n'; exit 0; }
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/lint.bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = "bash .claude/scripts/implement-issue-test/run-tests.sh && bats tests/*.bats" ]
+}
+
+@test "_build_bash_test_command produces full expected string with bats glob fallback and tests dir" {
+    # Mock bats without --jobs support to test serial fallback
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--help" ]] && { printf 'Usage: bats [OPTIONS] <tests>\n'; exit 0; }
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/lint.bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = "bats .claude/scripts/implement-issue-test/*.bats && bats tests/*.bats" ]
+}
+
+# =============================================================================
+# _build_bash_test_command() — parallel bats (--jobs) support
+# =============================================================================
+
+@test "_build_bash_test_command uses parallel bats when bats supports --jobs" {
+    # Mock bats with --jobs support
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+    printf '%s\n' "Usage: bats [OPTIONS] <tests>" \
+        "  -j, --jobs <jobs>  Number of parallel jobs"
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    # Mock parallel so the --jobs backend guard passes
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/bin/parallel"
+    chmod +x "$TEST_TMP/bin/parallel"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    # cpu_count is evaluated at runtime (nproc / sysctl / 4 fallback)
+    [[ "$result" == *" --jobs "* ]] || \
+        fail "Expected '--jobs' in command. Got: $result"
+    [[ "$result" == *".claude/scripts/implement-issue-test/"*".bats" ]] || \
+        fail "Expected pipeline bats suite in command. Got: $result"
+}
+
+@test "_build_bash_test_command appends parallel bats to tests/*.bats when --jobs supported" {
+    # Mock bats with --jobs support
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+    printf '%s\n' "Usage: bats [OPTIONS] <tests>" \
+        "  -j, --jobs <jobs>  Number of parallel jobs"
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    # Mock parallel so the --jobs backend guard passes
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/bin/parallel"
+    chmod +x "$TEST_TMP/bin/parallel"
+
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/foo.bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    # cpu_count is evaluated at runtime; just confirm --jobs precedes tests/*.bats
+    [[ "$result" == *"&& bats --jobs "* ]] || \
+        fail "Expected '&& bats --jobs' suffix. Got: $result"
+    [[ "$result" == *" tests/"*".bats" ]] || \
+        fail "Expected 'tests/*.bats' in command. Got: $result"
+}
+
+@test "_build_bash_test_command uses plain bats when bats does not support --jobs" {
+    # Mock bats without --jobs in help output
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--help" ]] && { printf 'Usage: bats [OPTIONS] <tests>\n'; exit 0; }
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = "bats .claude/scripts/implement-issue-test/*.bats" ]
+}
+
+@test "_build_bash_test_command run-tests.sh used but appended tests use parallel bats when --jobs supported" {
+    # Mock bats with --jobs support
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+    printf '%s\n' "Usage: bats [OPTIONS] <tests>" \
+        "  -j, --jobs <jobs>  Number of parallel jobs"
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    # Mock parallel so the --jobs backend guard passes
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/bin/parallel"
+    chmod +x "$TEST_TMP/bin/parallel"
+
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/lint.bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    # run-tests.sh prefix is unchanged; cpu_count is runtime-evaluated
+    [[ "$result" == "bash .claude/scripts/implement-issue-test/run-tests.sh && bats --jobs "* ]] || \
+        fail "Expected run-tests.sh prefix with parallel bats. Got: $result"
+    [[ "$result" == *" tests/"*".bats" ]] || \
+        fail "Expected 'tests/*.bats' in command. Got: $result"
 }
 

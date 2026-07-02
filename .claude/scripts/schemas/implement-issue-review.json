@@ -15,19 +15,8 @@
         }
       }
     },
-    "adjacent_issues": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "title": {"type": "string"},
-          "body": {"type": "string"},
-          "severity": {"enum": ["major", "minor"]}
-        },
-        "required": ["title", "severity"]
-      }
-    },
     "summary": {"type": "string"}
   },
-  "required": ["result", "summary"]
+  "required": ["result", "summary"],
+  "additionalProperties": false
 }

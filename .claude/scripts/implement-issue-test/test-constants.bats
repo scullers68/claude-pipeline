@@ -35,10 +35,10 @@ teardown() {
     [ "$(type -t get_stage_timeout)" = "function" ]
 }
 
-@test "get_stage_timeout returns 900 for test-iter stages" {
+@test "get_stage_timeout returns 1500 for test-iter stages" {
     local result
     result=$(get_stage_timeout "test-iter-1")
-    [ "$result" -eq 900 ]
+    [ "$result" -eq 1500 ]
 }
 
 @test "get_stage_timeout returns 600 for docs stage" {
@@ -93,7 +93,7 @@ teardown() {
     local combined_timeout generic_timeout
     combined_timeout=$(get_stage_timeout "test-iter-1")
     generic_timeout=$(get_stage_timeout "test-something")
-    [ "$combined_timeout" -eq 900 ]
+    [ "$combined_timeout" -eq 1500 ]
     [ "$generic_timeout" -eq 600 ]
 }
 
@@ -260,14 +260,17 @@ teardown() {
 
 @test "script uses set -uo pipefail" {
     local script_content
-    script_content=$(head -20 "$ORCHESTRATOR_SCRIPT")
+    # The header grew over time; the `set -uo pipefail` line now sits past
+    # line 40, so read a wider window than the original head -20.
+    script_content=$(head -60 "$ORCHESTRATOR_SCRIPT")
 
     [[ "$script_content" == *"set -uo pipefail"* ]]
 }
 
 @test "script does not use set -e (handles errors explicitly)" {
     local script_content
-    script_content=$(head -20 "$ORCHESTRATOR_SCRIPT")
+    # Widened window: the shell-options header now extends past line 40.
+    script_content=$(head -60 "$ORCHESTRATOR_SCRIPT")
 
     # Should NOT have set -e or set -euo (errexit causes unpredictable behavior)
     # The script should use explicit error handling instead

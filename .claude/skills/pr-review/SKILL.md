@@ -1,3 +1,31 @@
+---
+name: pr-review
+description: Review a pull request diff against issue requirements and return an approved or changes_requested verdict
+inputs:
+  - name: diff
+    type: string
+    required: true
+    description: The PR diff to review, provided inline in the prompt
+  - name: issue_number
+    type: integer
+    required: true
+    description: GitHub issue number to fetch acceptance criteria and requirements from
+outputs:
+  - name: verdict
+    type: string
+    description: Review outcome — approved or changes_requested
+  - name: issues
+    type: array
+    description: List of findings with severity (major or minor) and supporting evidence from the diff
+side_effects: []
+composes: []
+failure_modes:
+  - id: review_timeout
+    mitigation: Stop exploring the codebase — review only the provided diff; complete in 3-5 turns maximum
+  - id: issue_fetch_failed
+    mitigation: Stop and report error — cannot review without fetching the requirements
+---
+
 # PR Review
 
 Review a pull request diff against the issue requirements. Produce a verdict (approved / changes_requested) with evidence.
@@ -31,6 +59,15 @@ Review a pull request diff against the issue requirements. Produce a verdict (ap
 | Scope creep | Are there changes unrelated to the issue? Flag as major if they introduce risk |
 | Missing files | Does the issue mention files that don't appear in the diff? |
 
+## Multi-PR Issues
+
+When the prompt contains a **Prior Merged PRs** section (injected by the orchestrator), the issue spans multiple pull requests. Apply these rules:
+
+- **An AC is DONE if it is addressed by either this diff OR any PR listed in the Prior Merged PRs section.** Do not flag it as missing.
+- Only flag an AC as missing if it is absent from both this diff and all prior merged PRs.
+- A prior merged PR "addresses" an AC if its title or the files it touched plausibly cover that requirement.
+- Never request changes for ACs already satisfied by prior merged PRs.
+
 ## Code Review Checklist
 
 Apply only the items relevant to the technology in the diff. Skip items that don't apply.
@@ -60,6 +97,9 @@ Apply only the items relevant to the technology in the diff. Skip items that don
 - Assertions check meaningful values (no hollow `expect(true).toBe(true)`)
 - Test names describe the behavior being verified
 - No test-only methods added to production code
+- Mock-timing perf — `performance.now()` threshold inside a `jest.mock`/`vi.mock` file; e.g., `expect(delta).toBeLessThan(200)` where the timed function is mocked — the mock runs in nanoseconds so the threshold is never falsified
+- Constant-arithmetic tautology — `expect(<constant expr>).toBe(<constant>)` asserts compile-time arithmetic, not behaviour; e.g., `expect(30000 / 5).toBe(6000)` always passes and verifies nothing about the system under test
+- Self-referential matcher — `toBe`/`toEqual` compares the same property from two objects derived from the same source; e.g., `expect(result1.userThreshold).toBe(result2.userThreshold)` when both share the same seed — both could be wrong and the test still passes
 
 ## Severity Guide
 

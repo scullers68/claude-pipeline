@@ -2,6 +2,34 @@
 name: implement-issue
 description: Use when given an issue number/key and base branch to implement end-to-end
 argument-hint: "[issue-number] [base-branch]"
+inputs:
+  - name: issue_number
+    type: string
+    required: true
+    description: Issue number or key (e.g. "123" or "KIN-123")
+  - name: base_branch
+    type: string
+    required: true
+    description: Base branch to branch from and target for the PR
+outputs:
+  - name: pr_url
+    type: url
+    description: Pull request created upon successful completion
+  - name: status_json
+    type: file
+    description: Final orchestrator status snapshot at logs/implement-issue/issue-N-timestamp/status.json
+side_effects:
+  - creates_git_branch
+  - creates_pull_request
+  - writes_logs: logs/implement-issue/issue-<N>-<ts>/
+composes: []
+failure_modes:
+  - id: orchestrator_exit_1
+    mitigation: check stage logs in logs/implement-issue/issue-N-timestamp/stages/ for the failing stage
+  - id: orchestrator_exit_2
+    mitigation: reduce task complexity or split the issue into smaller tasks
+  - id: orchestrator_exit_3
+    mitigation: verify --issue and --branch arguments are correct and the issue exists
 ---
 
 # Implement Issue
@@ -16,68 +44,36 @@ End-to-end issue implementation — reads plan from issue tracker, implements wi
 
 ## Invocation
 
-The orchestrator is a long-running process (10-60 minutes) that spawns Claude CLI subprocesses for each stage. It must be launched in the background to avoid SIGPIPE — if the Bash tool's output buffer fills or a pipe truncates (e.g., `| head`), the orchestrator is killed silently mid-stage.
-
-### Step 1: Launch in background
+Immediately launch the orchestrator:
 
 ```bash
-LOG_DIR="logs/implement-issue/issue-${ISSUE_NUMBER}-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$LOG_DIR"
+.claude/scripts/implement-issue-orchestrator.sh \
+  --issue $ISSUE_NUMBER \
+  --branch $BASE_BRANCH
+```
 
-nohup .claude/scripts/implement-issue-orchestrator.sh \
+Or with explicit agent override:
+
+```bash
+.claude/scripts/implement-issue-orchestrator.sh \
   --issue $ISSUE_NUMBER \
   --branch $BASE_BRANCH \
-  > "$LOG_DIR/orchestrator-stdout.log" 2>&1 &
-
-ORCH_PID=$!
-echo "Orchestrator PID: $ORCH_PID"
+  --agent bulletproof-frontend-developer
 ```
 
-With explicit agent override:
+## Monitoring
+
+Check progress via status.json:
 
 ```bash
-nohup .claude/scripts/implement-issue-orchestrator.sh \
-  --issue $ISSUE_NUMBER \
-  --branch $BASE_BRANCH \
-  --agent bulletproof-frontend-developer \
-  > "$LOG_DIR/orchestrator-stdout.log" 2>&1 &
+jq . status.json
 ```
 
-### Step 2: Monitor via status.json
-
-Poll `status.json` to track progress. Do NOT pipe the orchestrator through `head`, `tail`, or any command that truncates output — this sends SIGPIPE and kills the process.
+Watch live:
 
 ```bash
-# Quick status check
-jq -c '{state, stage: .current_stage, task: .current_task, quality: .quality_iterations}' status.json
-
-# Check if still running
-kill -0 $ORCH_PID 2>/dev/null && echo "Running" || echo "Finished"
-
-# Recent log lines
-tail -5 logs/implement-issue/issue-*/orchestrator.log
+watch -n 5 'jq -c "{state,stage:.current_stage,task:.current_task,quality:.quality_iterations}" status.json'
 ```
-
-### Step 3: Handle completion
-
-When `status.json` shows `state: "completed"` or `state: "error"`:
-
-```bash
-jq '{state, current_stage, error, pr_url}' status.json
-```
-
-## Fallback: Manual implementation
-
-If the orchestrator fails (missing CLI auth, rate limits, infrastructure issues), implement manually following the same quality gates:
-
-1. **Parse issue** — read issue body via platform CLI or MCP, extract implementation tasks
-2. **Create branch** — `git checkout -b feature/issue-$ISSUE_NUMBER $BASE_BRANCH`
-3. **Implement** — execute each task, using the specified agent type as guidance
-4. **Test** — run unit tests and E2E tests per `platform.sh` config
-5. **Commit and push** — commit changes, push branch
-6. **Create MR/PR** — via platform wrapper or CLI
-
-This fallback ensures the issue gets implemented even when the orchestrator can't run.
 
 ## Stages
 
@@ -85,6 +81,7 @@ This fallback ensures the issue gets implemented even when the orchestrator can'
 |-------|-------|-------------|
 | parse-issue | default | read issue body, extract implementation tasks |
 | validate-plan | default | verify referenced files/patterns still exist |
+| triage | default (Haiku) | classify route: `fast-path` (surgical, test-only) or `full` (default) — see handle-issues SKILL for the six criteria |
 | implement | per-task | execute each task from GH issue task list |
 | task-review | spec-reviewer | verify task achieved goal |
 | fix | per-task | address review findings |
@@ -103,7 +100,6 @@ Located in `.claude/scripts/schemas/implement-issue-*.json`
 
 Logs written to `logs/implement-issue/issue-N-timestamp/`:
 - `orchestrator.log` — main log
-- `orchestrator-stdout.log` — raw stdout/stderr from nohup launch
 - `stages/` — per-stage Claude output
 - `context/` — parsed outputs (tasks.json, etc.)
 - `status.json` — final status snapshot
@@ -117,14 +113,7 @@ Logs written to `logs/implement-issue/issue-N-timestamp/`:
 | 2 | Max iterations exceeded |
 | 3 | Configuration/argument error |
 
-## Common Failures
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Orchestrator dies immediately | SIGPIPE from piped output | Use `nohup ... &`, never pipe through `head`/`tail` |
-| "unauthorized" from acli | CLI not authenticated | Run `acli jira auth login` |
-| status.json stuck at "running" | Process killed externally | Check `kill -0 $PID`, restart if needed |
-| Claude CLI rate limited | Too many API calls | Orchestrator handles retry automatically |
+If the orchestrator is killed mid-stage, the EXIT trap rewrites `state="running"` in `status.json` to `interrupted_during_<stage>` (e.g., `interrupted_during_merge_pr`) so the exit point is observable rather than masked by the recovery path in `batch-orchestrator.sh`.
 
 ## Integration
 

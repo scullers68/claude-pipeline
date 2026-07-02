@@ -1,6 +1,33 @@
 ---
 name: adapting-claude-pipeline
 description: Use when adapting the generic .claude pipeline folder to a specific codebase - adjusting skills, agents, hooks, scripts, prompts, and settings for the target project's tech stack and workflows
+inputs:
+  - name: project_description
+    type: string
+    required: false
+    description: Brief description of the target project's stack, domain, and workflows; used to guide brainstorming if not yet collected
+outputs:
+  - name: adapted_claude_directory
+    type: file_path
+    description: Path to the .claude/ directory after all modifications and apply-local.sh has been run
+  - name: adaptation_summary
+    type: string
+    description: Summary of all changes made — skills added/removed, agents created, hooks updated, settings changed
+side_effects:
+  - modifies_claude_local_directory
+  - runs_apply_local_sh
+composes:
+  - brainstorming
+  - writing-plans
+  - writing-skills
+  - writing-agents
+  - subagent-driven-development
+  - dispatching-parallel-agents
+failure_modes:
+  - id: orphaned_references
+    mitigation: Grep for deleted skill and agent names in all remaining .claude/ files and update or remove broken references before completing
+  - id: skip_web_research
+    mitigation: Always WebSearch for domain-specific best practices and anti-patterns before creating or modifying agents
 ---
 
 # Adapting Claude Pipeline to a Codebase
@@ -54,6 +81,13 @@ cp .claude/agents/fastify-backend-developer.md .claude/local/agents/
 cp .claude/agents/react-frontend-developer.md .claude/local/agents/
 cp .claude/agents/playwright-test-developer.md .claude/local/agents/
 
+# Strip STACK-SPECIFIC marker comments from local copies
+for f in .claude/local/agents/*.md; do
+    [[ -f "$f" ]] || continue
+    grep -v '^<!-- STACK-SPECIFIC:' "$f" > "${f}.tmp" \
+        && mv "${f}.tmp" "$f"
+done
+
 # Copy config for customization
 cp .claude/config/platform.sh .claude/local/config/
 
@@ -90,6 +124,10 @@ Focus questions on:
   - **Unit tests:** What test runner? What command?
   - **E2E tests:** Does the project have or need browser-based testing? If yes: Playwright already configured or needs setup? Base URL for test environment?
   - **Manual QA:** Is there a manual testing process that could be automated with Playwright?
+- **Auth:**
+  - **Route root:** Where are protected routes declared? (e.g., `src/routes/`, `app/api/`, router config file)
+  - **Guard function names:** What are the auth guard / middleware function names? (e.g., `withAuth`, `requireAuth`, `authenticate`)
+  - **Guard middleware files:** Which files define or export these guards? (e.g., `src/middleware/auth.ts`, `middleware.ts`)
 - **MCP tools:**
   - **Context7:** Available? What frameworks/libraries should agents look up via Context7?
   - **Serena:** Available? Useful for codebase navigation in this project?
@@ -378,6 +416,77 @@ Based on brainstorming answers, modify `.claude/config/platform.sh`:
 
 **Parallel execution:** Tasks in different workstreams with no shared files can run in parallel using `dispatching-parallel-agents`.
 
+### Phase 5.5: Test Framework Detection
+
+Detect the project's test frameworks, confirm with the user, and write the `## Test Layout` block to `PLATFORM_CONTEXT_FILE` (`.claude/config/context.md`).
+
+**Step 1 — Auto-detect test formats:**
+
+Scan the project root and common config locations to identify which test frameworks are in use:
+
+```
+detect:
+  jest:    package.json contains "jest" key OR jest.config.{js,ts,cjs,mjs} exists
+  vitest:  package.json contains "vitest" key OR vitest.config.{js,ts} exists
+  pytest:  pytest.ini OR pyproject.toml [tool.pytest.*] OR conftest.py exists
+  go_test: *_test.go files present anywhere in the repo
+  rspec:   .rspec OR spec/spec_helper.rb exists
+  bats:    *.bats files present OR test/*.bats exists
+```
+
+Collect all matched formats into a list.
+
+**Step 2 — Detect auth guards (web stacks only):**
+
+Only perform this step if the project is a web application (has a frontend framework — Next.js, React Router, Nuxt, Rails, Django, Laravel, etc.). Signs of a web stack: `next.config.*`, `vite.config.*` with JSX, `routes/` or `views/` directories, `app/Http/` (Laravel), `urls.py` (Django).
+
+If web stack detected, scan for auth guard patterns:
+```
+- Protected route root (e.g. src/routes/, app/routes/)
+- Auth HOC or middleware (withAuth, authenticate, requireLogin, login_required)
+- RBAC helpers (requireRole, hasPermission)
+```
+
+Skip this step entirely for non-web stacks (CLI tools, libraries, data pipelines, Go services without HTTP).
+
+**Step 3 — Show detected layout and confirm:**
+
+Present the detected layout to the user before writing anything:
+
+```
+Detected test layout:
+  formats: jest, vitest
+  auth_guards: withAuth() from src/middleware/auth.ts (web stack)
+
+Write this to context.md as the ## Test Layout block? [Y/n]
+```
+
+If the user corrects the layout, update the detected values before proceeding.
+
+**Step 4 — Write `## Test Layout` block to context.md:**
+
+Append (or replace if already present) the `## Test Layout` block in `PLATFORM_CONTEXT_FILE`:
+
+```markdown
+## Test Layout
+
+formats: jest, vitest          <!-- space-separated list of detected frameworks -->
+
+<!-- auth_guards: omit this subsection entirely for non-web stacks -->
+auth_guards:
+  - protected_root: src/routes/   <!-- directory where all routes require auth by default -->
+  - guard: withAuth() HOC from src/middleware/auth.ts — wrap page components
+  - middleware: authenticate from src/middleware/auth.ts — apply via preHandler
+  - rbac: requireRole(role) from src/middleware/rbac.ts — use after authenticate
+```
+
+Rules for writing the block:
+- `formats` line is always present; list only the detected frameworks (no placeholders).
+- `auth_guards` subsection is **only written for web stacks**. For non-web stacks, omit it entirely — do not leave a commented-out placeholder.
+- If the block already exists in context.md, replace it in-place rather than appending.
+
+**If detection finds no frameworks:** Ask the user to specify manually before writing anything.
+
 ### Phase 6: Verify
 
 After all modifications:
@@ -389,6 +498,21 @@ After all modifications:
 5. **Agent coordination audit** — Deferral relationships between agents are consistent
 6. **Dry run** — Walk through a typical workflow (e.g., implement-issue) mentally to verify the pipeline makes sense
 7. **Local override check** — Verify all customized files exist in `.claude/local/` and `apply-local.sh` runs cleanly
+
+## Design Notes
+
+### Test Layout fallback at runtime
+
+If the `## Test Layout` block is absent from `context.md` when an implement agent runs, the agent should **not** silently proceed with unknown test commands. The correct fallback behavior is:
+
+1. **Auto-detect** test frameworks from the project root (same logic as Phase 5.5 above).
+2. **Warn the user** with a clear message:
+
+   > ⚠️ No `## Test Layout` block found in context.md. Detected formats: `jest`. Run the `adapting-claude-pipeline` skill to persist this configuration and avoid repeated detection on every task.
+
+3. Use the auto-detected formats for the current task only — do not write to context.md automatically (that is the adapting-claude-pipeline skill's job).
+
+This ensures the pipeline degrades gracefully on unadapted repos without silently skipping test validation.
 
 ## Common Adaptation Patterns
 

@@ -55,6 +55,25 @@ Delete entries when they're no longer relevant.
 - Mock external HTTP calls with `msw` — do NOT let tests hit real third-party APIs; mark any test that does as `@skip` until mocked
 -->
 
+## Test Layout
+
+<!-- Populated by the adapting-claude-pipeline skill (Phase 5.5).
+     Run that skill to auto-detect frameworks and write the block below.
+     If this block is absent at runtime, implement agents will auto-detect
+     and warn you to run adapting-claude-pipeline to persist the config. -->
+
+<!-- Example format (delete and replace with detected values):
+
+formats: jest vitest          # space-separated list of detected test frameworks
+
+# auth_guards subsection — ONLY for web stacks. Omit entirely for non-web projects.
+auth_guards:
+  - protected_root: src/routes/   # directory where all routes require auth by default
+  - guard: withAuth() HOC from src/middleware/auth.ts — wrap page components; do NOT inline JWT decode
+  - middleware: authenticate from src/middleware/auth.ts — apply to routes via preHandler: [authenticate]
+  - rbac: requireRole(role) from src/middleware/rbac.ts — use after authenticate for role-restricted endpoints
+-->
+
 ## Existing Service Patterns
 
 <!-- When adding a new feature that touches a shared service or shared table,

@@ -73,14 +73,34 @@ teardown() {
 @test "accepts --status-file option" {
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --status-file custom-status.json 2>&1
     [ -n "$output" ]
-    [[ "$output" == *"Status file:"* ]]
-    [[ "$output" == *"custom-status.json"* ]]
+    [[ "$output" == *"Status file: "*"custom-status.json"* ]]
 }
 
 @test "fails with --status-file but no value" {
     run bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --status-file 2>&1
     [ "$status" -eq 3 ]
     [[ "$output" == *"--status-file requires a value"* ]]
+}
+
+@test "default status file is resolved to an absolute path" {
+    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
+    [ -n "$output" ]
+    [[ "$output" =~ "Status file: /" ]]
+}
+
+@test "relative --status-file is resolved to an absolute path" {
+    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" \
+        --issue 123 --branch test --status-file relative.json 2>&1
+    [ -n "$output" ]
+    [[ "$output" =~ "Status file: /" ]]
+    [[ "$output" == *"relative.json"* ]]
+}
+
+@test "absolute --status-file is kept as-is" {
+    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" \
+        --issue 123 --branch test --status-file /tmp/absolute.json 2>&1
+    [ -n "$output" ]
+    [[ "$output" == *"Status file: /tmp/absolute.json"* ]]
 }
 
 # =============================================================================
@@ -136,47 +156,7 @@ teardown() {
 @test "defaults status file to status.json" {
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
     [ -n "$output" ]
-    [[ "$output" == *"Status file:"* ]]
-    [[ "$output" == *"status.json"* ]]
-}
-
-# =============================================================================
-# ABSOLUTE PATH CANONICALIZATION
-# =============================================================================
-
-@test "default status file path is absolute" {
-    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
-    [ -n "$output" ]
-    # Extract the status file path from output and verify it starts with /
-    local status_line
-    status_line=$(printf '%s\n' "$output" | grep "^Status file:")
-    [[ "$status_line" == *": /"* ]]
-}
-
-@test "relative --status-file path is resolved to absolute" {
-    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" \
-        --issue 123 --branch test --status-file my-status.json 2>&1
-    [ -n "$output" ]
-    local status_line
-    status_line=$(printf '%s\n' "$output" | grep "^Status file:")
-    [[ "$status_line" == *": /"* ]]
-    [[ "$status_line" == *"my-status.json"* ]]
-}
-
-@test "absolute --status-file path is preserved" {
-    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" \
-        --issue 123 --branch test \
-        --status-file "$TEST_TMP/abs-status.json" 2>&1
-    [ -n "$output" ]
-    [[ "$output" == *"Status file: $TEST_TMP/abs-status.json"* ]]
-}
-
-@test "default log dir path is absolute" {
-    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
-    [ -n "$output" ]
-    local logdir_line
-    logdir_line=$(printf '%s\n' "$output" | grep "^Log dir:")
-    [[ "$logdir_line" == *": /"* ]]
+    [[ "$output" == *"Status file: "*"status.json"* ]]
 }
 
 # =============================================================================

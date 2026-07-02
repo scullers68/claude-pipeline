@@ -110,36 +110,39 @@ teardown() {
 # =============================================================================
 
 @test "orchestrator implements graduated model escalation on task retry" {
-    local main_def
-    main_def=$(declare -f main)
-    [[ "$main_def" == *"_next_model_up"* ]] || \
-        fail "Model escalation (_next_model_up) not found in implement task retry"
-    [[ "$main_def" == *"review_attempts"* ]] || \
-        fail "Retry attempt counter (review_attempts) not found in implement task loop"
+    # The per-task retry/escalation loop lives in run_task_in_worktree,
+    # not inline in main (main delegates per-task work to this helper).
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
+    [[ "$fn_def" == *"_next_model_up"* ]] || \
+        fail "Model escalation (_next_model_up) not found in run_task_in_worktree"
+    [[ "$fn_def" == *"review_attempts"* ]] || \
+        fail "Retry attempt counter (review_attempts) not found in run_task_in_worktree"
 }
 
 @test "orchestrator escalates timeout by 20% on implement task retry" {
-    local main_def
-    main_def=$(declare -f main)
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
     # The 20% timeout increase: base_timeout * 120 / 100
-    [[ "$main_def" == *"120 / 100"* ]] || \
-        fail "20%% timeout escalation formula (base_timeout * 120 / 100) not found in main"
+    [[ "$fn_def" == *"120 / 100"* ]] || \
+        fail "20%% timeout escalation formula (base_timeout * 120 / 100) not found in run_task_in_worktree"
 }
 
 @test "orchestrator only escalates model on retry not on first attempt" {
-    local main_def
-    main_def=$(declare -f main)
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
     # review_attempts > 1 guards the escalation so first attempt uses base model
-    [[ "$main_def" == *"review_attempts > 1"* ]] || \
+    [[ "$fn_def" == *"review_attempts > 1"* ]] || \
         fail "Guard condition (review_attempts > 1) for model escalation not found"
 }
 
 @test "orchestrator logs model escalation on task retry" {
-    local main_def
-    main_def=$(declare -f main)
-    # A log message must accompany the escalation for observability
-    [[ "$main_def" == *"escalating"* ]] || \
-        fail "Escalation log message not found in implement task retry"
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
+    # A log message must accompany the escalation for observability.
+    # declare -f renders the multi-arg log call as: "...escalating" "to $current_model..."
+    [[ "$fn_def" == *"escalating"* ]] || \
+        fail "Escalation log message not found in run_task_in_worktree"
 }
 
 # =============================================================================
@@ -192,11 +195,13 @@ teardown() {
 }
 
 @test "parse_issue regex matches unchecked task format" {
-    local main_def
-    main_def=$(declare -f main)
+    # Task-line parsing was extracted into _parse_task_lines, which main
+    # calls from the parse_issue stage. The regex captures live there.
+    local fn_def
+    fn_def=$(declare -f _parse_task_lines)
 
     # Matches: - [ ] `[agent-name]` Task description
-    [[ "$main_def" == *'BASH_REMATCH'* ]]
+    [[ "$fn_def" == *'BASH_REMATCH'* ]]
 }
 
 # =============================================================================
@@ -226,11 +231,13 @@ teardown() {
 }
 
 @test "implementation uses self-review prompt" {
-    local main_def
-    main_def=$(declare -f main)
+    # The implementation prompt is built in run_task_in_worktree (per-task
+    # worktree execution), not inline in main.
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
 
     # Self-review is embedded in the implementation prompt
-    [[ "$main_def" == *"SELF-REVIEW BEFORE COMMITTING"* ]]
+    [[ "$fn_def" == *"SELF-REVIEW BEFORE COMMITTING"* ]]
 }
 
 @test "implementation extracts task size from description" {
@@ -241,10 +248,12 @@ teardown() {
 }
 
 @test "implementation uses per-task agent" {
-    local main_def
-    main_def=$(declare -f main)
+    # The per-task agent is threaded through run_task_in_worktree, which
+    # main invokes per task.
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
 
-    [[ "$main_def" == *"task_agent"* ]]
+    [[ "$fn_def" == *"task_agent"* ]]
 }
 
 @test "implementation comments on issue after task completion" {
@@ -357,11 +366,12 @@ teardown() {
 }
 
 @test "implementation runs quality loop per task" {
-    local main_def
-    main_def=$(declare -f main)
+    # The per-task quality loop is invoked from run_task_in_worktree.
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
 
-    [[ "$main_def" == *"run_quality_loop"* ]]
-    [[ "$main_def" == *"should_run_quality_loop"* ]]
+    [[ "$fn_def" == *"run_quality_loop"* ]]
+    [[ "$fn_def" == *"should_run_quality_loop"* ]]
 }
 
 @test "S-size tasks skip quality loop" {
@@ -1062,61 +1072,64 @@ teardown() {
 # =============================================================================
 
 @test "implement loop captures base_timeout and base_model before retry loop" {
-    local main_def
-    main_def=$(declare -f main)
+    # The per-task retry loop lives in run_task_in_worktree, not main.
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
 
     # Must resolve base values once, outside the while loop
-    [[ "$main_def" == *"base_timeout"* ]]
-    [[ "$main_def" == *"base_model"* ]]
-    [[ "$main_def" == *'get_stage_timeout'* ]]
-    [[ "$main_def" == *'resolve_model'* ]]
+    [[ "$fn_def" == *"base_timeout"* ]]
+    [[ "$fn_def" == *"base_model"* ]]
+    [[ "$fn_def" == *'get_stage_timeout'* ]]
+    [[ "$fn_def" == *'resolve_model'* ]]
 }
 
 @test "implement loop uses _next_model_up for model escalation on retry" {
-    local main_def
-    main_def=$(declare -f main)
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
 
-    [[ "$main_def" == *'_next_model_up "$base_model"'* ]]
+    [[ "$fn_def" == *'_next_model_up "$base_model"'* ]]
 }
 
 @test "implement loop increases timeout by 20 percent on retry" {
-    local main_def
-    main_def=$(declare -f main)
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
 
     # 20% increase: base * 120 / 100
-    [[ "$main_def" == *'120 / 100'* ]]
-    [[ "$main_def" == *'current_timeout'* ]]
+    [[ "$fn_def" == *'120 / 100'* ]]
+    [[ "$fn_def" == *'current_timeout'* ]]
 }
 
 @test "implement loop passes model_override to run_stage on retry" {
-    local main_def
-    main_def=$(declare -f main)
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
 
-    # run_stage must be called with current_model as 7th arg on retry
-    [[ "$main_def" == *'"$current_model"'* ]]
+    # run_stage must be called with current_model as the model override on retry
+    [[ "$fn_def" == *'"$current_model"'* ]]
 }
 
 @test "implement loop passes timeout_override to run_stage on retry" {
-    local main_def
-    main_def=$(declare -f main)
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
 
-    # run_stage must be called with current_timeout as 6th arg on retry
-    [[ "$main_def" == *'"$current_timeout"'* ]]
+    # run_stage must be called with current_timeout as the timeout override on retry
+    [[ "$fn_def" == *'"$current_timeout"'* ]]
 }
 
 @test "implement loop logs escalation message on retry" {
-    local main_def
-    main_def=$(declare -f main)
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
 
-    [[ "$main_def" == *"escalating to"* ]]
+    # declare -f renders the multi-arg log call with "escalating" as its own
+    # quoted token followed by "to $current_model ...".
+    [[ "$fn_def" == *"escalating"* ]]
 }
 
 @test "implement loop only escalates after first attempt" {
-    local main_def
-    main_def=$(declare -f main)
+    local fn_def
+    fn_def=$(declare -f run_task_in_worktree)
 
     # Gate on review_attempts > 1 (not >= 1)
-    [[ "$main_def" == *'review_attempts > 1'* ]]
+    [[ "$fn_def" == *'review_attempts > 1'* ]]
 }
 
 @test "20 percent timeout increase arithmetic is correct" {
@@ -1132,4 +1145,351 @@ teardown() {
     local base3=300
     local increased3=$((base3 * 120 / 100))
     [ "$increased3" -eq 360 ]
+}
+
+# =============================================================================
+# BATCH RESUME — second launch over same manifest skips completed issues
+# (issue #393: init_status must preserve prior completed/already_implemented
+# per-issue state instead of resetting all to pending on every launch)
+#
+# Root cause: init_status() is called unconditionally on every launch,
+# wiping the prior run's state before the idempotency check at line ~1033
+# can read it — making the skip logic dead code.
+#
+# Fix contract verified here:
+#   1. init_status checks for an existing status file and merges prior
+#      completed/already_implemented statuses instead of resetting all to pending.
+#   2. The main loop has an up-front gh check that skips closed/merged issues
+#      even when no prior status.json exists.
+# =============================================================================
+
+BATCH_ORCHESTRATOR="${SCRIPT_DIR}/batch-orchestrator.sh"
+
+@test "batch-orchestrator init_status checks for existing status file before resetting" {
+    local body
+    body=$(awk '/^init_status\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR")
+    [[ "$body" == *'-f "$STATUS_FILE"'* ]] || \
+        fail "init_status must guard with: if [[ -f \"\$STATUS_FILE\" ]] before resetting"
+}
+
+@test "batch-orchestrator init_status preserves completed per-issue status on resume" {
+    local body
+    body=$(awk '/^init_status\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR")
+    [[ "$body" == *'"completed"'* ]] || \
+        fail "init_status must reference 'completed' when rebuilding the issue list"
+}
+
+@test "batch-orchestrator init_status preserves already_implemented per-issue status on resume" {
+    local body
+    body=$(awk '/^init_status\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR")
+    [[ "$body" == *'"already_implemented"'* ]] || \
+        fail "init_status must reference 'already_implemented' when rebuilding the issue list"
+}
+
+@test "batch-orchestrator main loop logs Skipping issue when status is already completed" {
+    grep -q 'Skipping issue' "$BATCH_ORCHESTRATOR" || \
+        fail "No 'Skipping issue' log message in batch-orchestrator main loop"
+    grep -q 'already completed' "$BATCH_ORCHESTRATOR" || \
+        fail "No 'already completed' phrase in batch-orchestrator skip log"
+}
+
+@test "batch-orchestrator has up-front closed-issue check before process_issue" {
+    # Task 2 safety net: even with no prior status.json, a closed issue or
+    # merged PR detected via gh must be skipped before the orchestrator runs.
+    grep -q 'gh issue view' "$BATCH_ORCHESTRATOR" || \
+        fail "No 'gh issue view' up-front check found in batch-orchestrator"
+}
+
+@test "batch-orchestrator up-front check handles CLOSED issue state" {
+    # The gh check must handle the CLOSED state returned by gh issue view.
+    local loop_body
+    loop_body=$(awk '/^for issue in.*ISSUE_ARRAY/,/^done$/' "$BATCH_ORCHESTRATOR" 2>/dev/null)
+    [[ "$loop_body" == *'CLOSED'* ]] || \
+        fail "Main issue loop must check for CLOSED issue state from gh"
+}
+
+# --- Functional simulation tests ---
+#
+# These simulations replicate the merge logic that init_status must implement
+# and verify it maps every prior-run status to the correct post-resume status.
+# They pass against any implementation that follows the contract and are
+# independent of the exact code structure chosen by tasks 1 and 2.
+
+# Simulate the resume-aware status merge: maps prior statuses to post-resume values.
+# Only completed/already_implemented are preserved; everything else is re-queued.
+_simulate_resume_merge() {
+    local prior_status_file="$1"
+    shift
+    local -a manifest_issues=("$@")
+
+    local new_issues_json="[]"
+    for iss in "${manifest_issues[@]}"; do
+        local prior_st
+        prior_st=$(jq -r --arg n "$iss" \
+            '.issues[] | select(.number == $n) | .status // empty' \
+            "$prior_status_file" 2>/dev/null)
+        local new_st="pending"
+        if [[ "$prior_st" == "completed" || "$prior_st" == "already_implemented" ]]; then
+            new_st="$prior_st"
+        fi
+        new_issues_json=$(printf '%s' "$new_issues_json" | jq \
+            --arg n "$iss" --arg s "$new_st" \
+            '. + [{number: $n, status: $s}]')
+    done
+    printf '%s' "$new_issues_json"
+}
+
+@test "resume simulation: completed issues are preserved through init" {
+    local prior="$TEST_TMP/prior-status-completed.json"
+    jq -n '{"issues": [{"number": "100", "status": "completed"}]}' > "$prior"
+
+    local result
+    result=$(_simulate_resume_merge "$prior" "100")
+    local st
+    st=$(printf '%s' "$result" | jq -r '.[] | select(.number=="100") | .status')
+    [ "$st" = "completed" ] || fail "completed must survive reinit, got: $st"
+}
+
+@test "resume simulation: already_implemented issues are preserved through init" {
+    local prior="$TEST_TMP/prior-status-aimpl.json"
+    jq -n '{"issues": [{"number": "101", "status": "already_implemented"}]}' > "$prior"
+
+    local result
+    result=$(_simulate_resume_merge "$prior" "101")
+    local st
+    st=$(printf '%s' "$result" | jq -r '.[] | select(.number=="101") | .status')
+    [ "$st" = "already_implemented" ] || fail "already_implemented must survive reinit, got: $st"
+}
+
+@test "resume simulation: failed issues are re-queued as pending" {
+    local prior="$TEST_TMP/prior-status-failed.json"
+    jq -n '{"issues": [{"number": "102", "status": "failed"}]}' > "$prior"
+
+    local result
+    result=$(_simulate_resume_merge "$prior" "102")
+    local st
+    st=$(printf '%s' "$result" | jq -r '.[] | select(.number=="102") | .status')
+    [ "$st" = "pending" ] || fail "failed must be re-queued as pending, got: $st"
+}
+
+@test "resume simulation: in_progress issues are re-queued as pending" {
+    local prior="$TEST_TMP/prior-status-inprog.json"
+    jq -n '{"issues": [{"number": "103", "status": "in_progress"}]}' > "$prior"
+
+    local result
+    result=$(_simulate_resume_merge "$prior" "103")
+    local st
+    st=$(printf '%s' "$result" | jq -r '.[] | select(.number=="103") | .status')
+    [ "$st" = "pending" ] || fail "in_progress must be re-queued as pending, got: $st"
+}
+
+@test "resume simulation: issues absent from prior status start as pending" {
+    local prior="$TEST_TMP/prior-status-absent.json"
+    jq -n '{"issues": [{"number": "200", "status": "completed"}]}' > "$prior"
+
+    # Issue 201 does not appear in the prior run at all
+    local result
+    result=$(_simulate_resume_merge "$prior" "201")
+    local st
+    st=$(printf '%s' "$result" | jq -r '.[] | select(.number=="201") | .status')
+    [ "$st" = "pending" ] || fail "issue absent from prior run must start as pending, got: $st"
+}
+
+@test "resume simulation: mixed manifest preserves only terminal statuses" {
+    local prior="$TEST_TMP/prior-status-mixed.json"
+    jq -n '{
+        "issues": [
+            {"number": "300", "status": "completed"},
+            {"number": "301", "status": "already_implemented"},
+            {"number": "302", "status": "failed"},
+            {"number": "303", "status": "in_progress"},
+            {"number": "304", "status": "pending"}
+        ]
+    }' > "$prior"
+
+    local result
+    result=$(_simulate_resume_merge "$prior" "300" "301" "302" "303" "304")
+
+    local st300 st301 st302 st303 st304
+    st300=$(printf '%s' "$result" | jq -r '.[] | select(.number=="300") | .status')
+    st301=$(printf '%s' "$result" | jq -r '.[] | select(.number=="301") | .status')
+    st302=$(printf '%s' "$result" | jq -r '.[] | select(.number=="302") | .status')
+    st303=$(printf '%s' "$result" | jq -r '.[] | select(.number=="303") | .status')
+    st304=$(printf '%s' "$result" | jq -r '.[] | select(.number=="304") | .status')
+
+    [ "$st300" = "completed" ]           || fail "300: completed must survive, got: $st300"
+    [ "$st301" = "already_implemented" ] || fail "301: already_implemented must survive, got: $st301"
+    [ "$st302" = "pending" ]             || fail "302: failed must be reset to pending, got: $st302"
+    [ "$st303" = "pending" ]             || fail "303: in_progress must be reset to pending, got: $st303"
+    [ "$st304" = "pending" ]             || fail "304: pending must remain pending, got: $st304"
+}
+
+# =============================================================================
+# BATCH RESUME — functional second-launch scenario (real init_status)
+#
+# The simulation tests above reimplement the merge. This scenario instead runs
+# the ACTUAL init_status() extracted from batch-orchestrator.sh against a prior
+# status.json, then replays the real main-loop skip gate to prove that a
+# completed issue does NOT reach the implement entry point (process_issue) on
+# relaunch, while a pending issue does. This is the behavioural guarantee AC1
+# and AC3 require — not just the presence of a code structure.
+# =============================================================================
+
+@test "resume functional: relaunch preserves completed and skips implement stage" {
+    source_batch_function init_status
+
+    export BRANCH="main"
+    export LOG_BASE="$TEST_TMP/logs/resume"
+    export STATUS_FILE="$TEST_TMP/resume-status.json"
+    # Global (not local): the extracted init_status reads ISSUE_ARRAY by name.
+    # Dynamic scope makes a caller local visible to init_status anyway, but a
+    # plain assignment keeps intent obvious.
+    ISSUE_ARRAY=(100 101)
+
+    # Simulate a prior launch: 100 finished, 101 never ran.
+    jq -n '{
+        issues: [
+            {number: "100", status: "completed"},
+            {number: "101", status: "pending"}
+        ]
+    }' > "$STATUS_FILE"
+
+    # Second launch over the same manifest.
+    init_status
+
+    # Per-issue state: 100 preserved, 101 still pending.
+    local st100 st101
+    st100=$(jq -r '.issues[] | select(.number=="100") | .status' "$STATUS_FILE")
+    st101=$(jq -r '.issues[] | select(.number=="101") | .status' "$STATUS_FILE")
+    [ "$st100" = "completed" ] || fail "100 must survive relaunch, got: $st100"
+    [ "$st101" = "pending" ]   || fail "101 must stay pending, got: $st101"
+
+    # Aggregate progress must reflect the preserved completion.
+    local completed
+    completed=$(jq -r '.progress.completed' "$STATUS_FILE")
+    [ "$completed" = "1" ] || fail "progress.completed must be 1, got: $completed"
+
+    # Replay the real main-loop skip gate with a tracked implement stand-in.
+    local processed="$TEST_TMP/processed.log"
+    : > "$processed"
+    process_issue() { printf '%s\n' "$1" >> "$processed"; }
+
+    for issue in "${ISSUE_ARRAY[@]}"; do
+        local current_status
+        current_status=$(jq -r --arg num "$issue" \
+            '.issues[] | select(.number == $num) | .status' "$STATUS_FILE")
+        if [[ "$current_status" == "completed" ]]; then
+            continue
+        fi
+        process_issue "$issue"
+    done
+
+    # The completed issue's implement stage was NOT invoked; the pending one was.
+    ! grep -qx '100' "$processed" || \
+        fail "implement stage must be skipped for completed issue 100"
+    grep -qx '101' "$processed" || \
+        fail "implement stage must run for pending issue 101"
+}
+
+# =============================================================================
+# BATCH SIGNAL PROPAGATION — single SIGTERM to batch terminates orchestrator subtree
+# (issue #394: batch orphaned the orchestrator; one signal must clean up everything)
+#
+# AC1: Signalling the batch terminates the active orchestrator and all stage children
+# AC2: No orchestrator process reparented to init (ppid=1) after batch is killed
+# AC3: Orchestrator TERM handler propagates signal to background tasks before exiting
+# =============================================================================
+
+@test "single SIGTERM to batch terminates orchestrator subtree with no respawn" {
+    # Functional test for AC1/AC2: a single SIGTERM to the batch must propagate
+    # to the orchestrator's process group and leave no survivors.
+    # Stub scripts mirror the setsid + pgid-capture + kill-pgid pattern.
+    #
+    # setsid is Linux-only; macOS falls back to perl -MPOSIX=setsid which is
+    # always available and provides identical session-leader semantics.
+
+    local pgid_file="$TEST_TMP/orch.pgid"
+    local ready_file="$TEST_TMP/orch.ready"
+    local pgid_set_file="$TEST_TMP/batch.pgid_set"
+    local stub_orch="$TEST_TMP/stub-orch.sh"
+    local stub_batch="$TEST_TMP/stub-batch.sh"
+
+    # Stub orchestrator: session leader (setsid), writes own pgid, spawns a
+    # long-running child stage, and propagates TERM to the group on signal.
+    cat > "$stub_orch" << ORCH_STUB
+#!/usr/bin/env bash
+trap 'kill -- -\$\$ 2>/dev/null; exit 143' TERM
+printf '%s\n' "\$\$" > "${pgid_file}"
+touch "${ready_file}"
+sleep 300 &
+wait
+ORCH_STUB
+    chmod +x "$stub_orch"
+
+    # Stub batch: mirrors the three-part pattern tasks 1-2 implement —
+    #   1. launch orchestrator in its own process group (perl setsid)
+    #   2. capture the orchestrator pgid
+    #   3. TERM/EXIT cleanup trap that kills the orchestrator's entire pgid
+    cat > "$stub_batch" << BATCH_STUB
+#!/usr/bin/env bash
+_orch_pgid=""
+_cleanup() { [[ -n "\$_orch_pgid" ]] && kill -- -"\$_orch_pgid" 2>/dev/null; }
+trap '_cleanup; exit 143' TERM EXIT
+
+perl -MPOSIX=setsid -e 'setsid; exec @ARGV' -- "${stub_orch}" &
+_orch_pid=\$!
+_i=0
+while [[ ! -s "${pgid_file}" ]] && (( _i++ < 30 )); do sleep 0.1; done
+_orch_pgid=\$(cat "${pgid_file}" 2>/dev/null)
+touch "${pgid_set_file}"
+wait "\$_orch_pid"
+BATCH_STUB
+    chmod +x "$stub_batch"
+
+    # Start the stub batch.
+    "$stub_batch" &
+    local batch_pid=$!
+
+    # Wait for the batch to record the orchestrator pgid (up to 3 s).
+    local i=0
+    while [[ ! -f "$pgid_set_file" ]] && (( i++ < 30 )); do sleep 0.1; done
+    if [[ ! -f "$pgid_set_file" ]]; then
+        kill "$batch_pid" 2>/dev/null
+        fail "stub batch did not start orchestrator within 3 s"
+    fi
+
+    local orch_pgid
+    orch_pgid=$(cat "$pgid_file")
+    if [[ -z "$orch_pgid" ]]; then
+        kill "$batch_pid" 2>/dev/null
+        fail "stub orchestrator did not write its pgid"
+    fi
+
+    # Confirm the orchestrator process group is live before signalling.
+    kill -0 -- -"$orch_pgid" 2>/dev/null \
+        || { kill "$batch_pid" 2>/dev/null; fail "orchestrator pgid $orch_pgid not alive before signal"; }
+
+    # One SIGTERM to the batch; cleanup trap must propagate to the orchestrator group.
+    kill -TERM "$batch_pid"
+
+    # Poll until the orchestrator group dies (up to 5 s) instead of a fixed
+    # delay — faster on fast systems, resilient on slow CI.
+    local j=0
+    while kill -0 -- -"$orch_pgid" 2>/dev/null && (( j++ < 50 )); do
+        sleep 0.1
+    done
+
+    # Assert: orchestrator process group has no survivors after teardown.
+    kill -0 -- -"$orch_pgid" 2>/dev/null \
+        && fail "orchestrator pgid $orch_pgid still has survivors after single SIGTERM to batch"
+
+    # Assert: the group stays gone — re-poll over a short window to confirm it
+    # was not respawned (the "no respawn" half of this test's contract).
+    local k=0
+    while (( k++ < 5 )); do
+        sleep 0.1
+        kill -0 -- -"$orch_pgid" 2>/dev/null \
+            && fail "orchestrator pgid $orch_pgid respawned after teardown"
+    done
+    return 0
 }
