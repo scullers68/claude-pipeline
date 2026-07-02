@@ -1452,16 +1452,38 @@ handle_rate_limit() {
 # Returns empty string if skill file not found (non-fatal).
 load_skill() {
     local skill_name="$1"
-    # CLAUDE_PROJECT_DIR is set by Claude Code but absent when run from batch/shell directly.
-    # Fall back to the script's own repo root so skills load correctly in both contexts.
-    # Resolution order: explicit override, plugin layout (skills alongside
-    # scripts/ inside pipeline-core), then consumer project skills.
-    local _plugin_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    local skill_file="${PIPELINE_SKILLS_DIR:-$_plugin_root/skills}/$skill_name/SKILL.md"
-    # Consumer projects may override/extend with their own .claude/skills.
-    if [[ ! -f "$skill_file" && -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
-        skill_file="$CLAUDE_PROJECT_DIR/.claude/skills/$skill_name/SKILL.md"
+    local skill_file=""
+
+    # Resolution order (highest wins):
+    #   1. PIPELINE_SKILLS_DIR — explicit override (tests, unusual layouts)
+    #   2. Project override — a consumer may shadow a plugin skill by placing
+    #      its own copy at .claude/skills/<name>/SKILL.md
+    #   3. CLAUDE_PLUGIN_ROOT — set by Claude Code for installed plugins
+    #   4. Plugin root derived from this script's location (dev/test
+    #      checkouts), preferring the plugin layout with legacy fallback.
+    if [[ -n "${PIPELINE_SKILLS_DIR:-}" ]]; then
+        skill_file="$PIPELINE_SKILLS_DIR/$skill_name/SKILL.md"
     fi
+
+    if [[ -z "$skill_file" || ! -f "$skill_file" ]] && [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+        local project_skill_file="$CLAUDE_PROJECT_DIR/.claude/skills/$skill_name/SKILL.md"
+        [[ -f "$project_skill_file" ]] && skill_file="$project_skill_file"
+    fi
+
+    if [[ -z "$skill_file" || ! -f "$skill_file" ]]; then
+        local _plugin_root="${CLAUDE_PLUGIN_ROOT:-}"
+        if [[ -z "$_plugin_root" ]]; then
+            local _here
+            _here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+            if [[ -d "$_here/skills" ]]; then
+                _plugin_root="$_here"
+            else
+                _plugin_root="$(cd "$_here/.." && pwd)/.claude"
+            fi
+        fi
+        skill_file="$_plugin_root/skills/$skill_name/SKILL.md"
+    fi
+
     if [[ -f "$skill_file" ]]; then
         cat "$skill_file"
     else

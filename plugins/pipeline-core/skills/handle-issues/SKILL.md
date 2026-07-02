@@ -66,7 +66,7 @@ The orchestrator uses specialized agents via `--agent` flag to ensure the right 
 | process-pr | `code-reviewer` | **Always** - reviews PR/MR for quality and standards |
 
 **Determine agent based on issue content:**
-- Check which agents are configured in `${CLAUDE_PLUGIN_ROOT}/agents/` for this project
+- Check which agents are configured in `.claude/agents/` for this project
 - Match the issue's domain to the appropriate agent
 - **Mixed or unclear**: Use default (no agent specified)
 
@@ -124,7 +124,7 @@ parse-issue ──► triage ──┬──► fast-path: branch → implement 
                                                   (the standard pipeline)
 ```
 
-The fast-path lives in `${CLAUDE_PLUGIN_ROOT}/scripts/surgical-fast-path.sh`. It is
+The fast-path lives in `.claude/scripts/surgical-fast-path.sh`. It is
 deliberately the bare minimum — no test iterations, no review, no docs.
 The triage classifier must be confident that a fast-path issue is safe to
 ship without those gates.
@@ -165,7 +165,7 @@ prompt.
 | Env var | Default | Effect |
 |---------|---------|--------|
 | `DISABLE_SURGICAL_FAST_PATH` | `0` | `1` forces every issue to the full pipeline regardless of classifier output. Use during incidents. |
-| `TRIAGE_MODEL` | `haiku` (tier) | Override the model. Pass a tier name (`haiku`/`sonnet`/`opus`), not a pinned model ID — the tier-to-model mapping lives in `${CLAUDE_PLUGIN_ROOT}/scripts/model-config.sh`. |
+| `TRIAGE_MODEL` | `haiku` (tier) | Override the model. Pass a tier name (`haiku`/`sonnet`/`opus`), not a pinned model ID — the tier-to-model mapping lives in `.claude/scripts/model-config.sh`. |
 | `FAST_PATH_IMPLEMENT_MODEL` | `sonnet` | Model used by the fast-path implement step. |
 
 ### Pre-commit hook failure on fast-path
@@ -186,11 +186,11 @@ counted failure surface lets operators tune the criteria.
 
 Two test layers protect the triage system. Both must stay green:
 
-- `${CLAUDE_PLUGIN_ROOT}/scripts/implement-issue-test/test-surgical-fast-path.bats` —
+- `.claude/scripts/implement-issue-test/test-surgical-fast-path.bats` —
   18 mock-based tests covering the shell logic (kill switch, confidence
   demotion, grep verification, status-file bookkeeping, fast-path step
   ordering, hook-failure handling). Run via `bats`.
-- `${CLAUDE_PLUGIN_ROOT}/scripts/triage-validate.sh` — real-Claude golden tests
+- `.claude/scripts/triage-validate.sh` — real-Claude golden tests
   (~$0.10/run, ~100s) that exercise the actual prompt against all 10
   fixtures. **Run before merging changes to the prompt, schema, or
   triage tier model. Run monthly to catch model drift.** Do NOT
@@ -313,11 +313,11 @@ escalates sonnet → opus on the fly.
 If the response shape changes:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/capture-usage-fixture.sh
+.claude/scripts/capture-usage-fixture.sh
 ```
 
 (prompts for sessionKey + org UUID, writes to
-`${CLAUDE_PLUGIN_ROOT}/scripts/implement-issue-test/fixtures/usage-response.json`,
+`.claude/scripts/implement-issue-test/fixtures/usage-response.json`,
 prints the discovered field names so the bucket mapping can be updated).
 
 ## Process
@@ -462,7 +462,7 @@ echo "Manifest written to: $MANIFEST"
 ```
 
 **Agent values:**
-- Use project-specific agents configured in `${CLAUDE_PLUGIN_ROOT}/agents/` during `/adapting-claude-pipeline`
+- Use project-specific agents configured in `.claude/agents/` during `/adapting-claude-pipeline`
 - `null` or omitted — Default behavior
 
 ### Step 5: Launch Orchestrator
@@ -471,11 +471,11 @@ Launch the batch orchestrator as a background process:
 
 ```bash
 # Launch orchestrator (agent is read from manifest, or can be overridden via --agent)
-nohup ${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh --manifest "$MANIFEST" \
+nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 
 # Or with explicit agent override:
-# nohup ${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --agent bulletproof-frontend-developer \
+# nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" --agent bulletproof-frontend-developer \
 #   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 
 ORCHESTRATOR_PID=$!
@@ -703,7 +703,7 @@ Running `/handle-issues` with `--enrich-followups` (or `batch-orchestrator.sh --
 
 ```bash
 # Launch orchestrator with enrichment sweep enabled
-nohup ${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --enrich-followups \
+nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" --enrich-followups \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 ```
 
@@ -711,7 +711,7 @@ Running `/handle-issues` with `--implement-followups` implies `--enrich-followup
 
 ```bash
 # Launch orchestrator with enrichment + implementation sweep enabled
-nohup ${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --implement-followups \
+nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" --implement-followups \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 ```
 
@@ -743,9 +743,9 @@ Useful for any sparsely-described issue — whether pipeline-created or filed by
 
 | File | Purpose |
 |------|---------|
-| `${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh` | Main orchestration script (loops through issues); supports `--enrich-followups` and `--implement-followups` flags |
-| `${CLAUDE_PLUGIN_ROOT}/scripts/schemas/implement-issue.json` | JSON schema for implement-issue output |
-| `${CLAUDE_PLUGIN_ROOT}/scripts/schemas/process-pr.json` | JSON schema for process-pr output |
+| `.claude/scripts/batch-orchestrator.sh` | Main orchestration script (loops through issues); supports `--enrich-followups` and `--implement-followups` flags |
+| `.claude/scripts/schemas/implement-issue.json` | JSON schema for implement-issue output |
+| `.claude/scripts/schemas/process-pr.json` | JSON schema for process-pr output |
 | `status.json` | Real-time status (read by this skill, written by orchestrator) |
 | `logs/handle-issues/manifest-*.json` | Batch manifest (issues list + branch) |
 | `logs/batch-*/` | Per-batch logs and summary |
@@ -754,8 +754,8 @@ Useful for any sparsely-described issue — whether pipeline-created or filed by
 ## Integration
 
 **Requires:**
-- `${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh` (orchestration script)
-- `${CLAUDE_PLUGIN_ROOT}/scripts/schemas/*.json` (JSON schemas)
+- `.claude/scripts/batch-orchestrator.sh` (orchestration script)
+- `.claude/scripts/schemas/*.json` (JSON schemas)
 - `implement-issue` skill (invoked by orchestrator for primary issues and, when `--implement-followups` is set, for enriched follow-ups in the second wave)
 - `process-pr` skill (invoked by orchestrator)
 - `enrich-issue` skill (invoked by orchestrator when `--enrich-followups` or `--implement-followups` is set)
