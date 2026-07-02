@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Test sandboxes perform real git commits; runners ship with no identity.
+env:
+  GIT_AUTHOR_NAME: ci
+  GIT_AUTHOR_EMAIL: ci@invalid.local
+  GIT_COMMITTER_NAME: ci
+  GIT_COMMITTER_EMAIL: ci@invalid.local
+
 jobs:
   fast-suites:
     name: Platform + root suites (blocking)

@@ -17,6 +17,13 @@ on:
   schedule:
     - cron: '0 6 1 * *'  # 1st of each month, 06:00 UTC
 
+# Test sandboxes perform real git commits; runners ship with no identity.
+env:
+  GIT_AUTHOR_NAME: ci
+  GIT_AUTHOR_EMAIL: ci@invalid.local
+  GIT_COMMITTER_NAME: ci
+  GIT_COMMITTER_EMAIL: ci@invalid.local
+
 jobs:
   skill-golden:
     name: Skill Golden Tests
