@@ -8,32 +8,7 @@
  * verifiable before any real logic exists.
  */
 
-type StageStatus = "success" | "error" | "rate_limit";
-
-type ErrorKind =
-  | "timeout"
-  | "double_timeout"
-  | "schema_not_found"
-  | "no_structured_output"
-  | "max_turns_exhausted_at_ceiling"
-  | "rate_limit"
-  | "permission_denied"
-  | "quality_stall"
-  | "max_turns_exhausted"
-  | "structured_error"
-  | null;
-
-interface StageResultEnvelope {
-  status: StageStatus;
-  output: Record<string, unknown> | null;
-  raw: string;
-  denials: string[];
-  model: string;
-  error_kind: ErrorKind;
-  elapsed_ms: number;
-}
-
-const envelope: StageResultEnvelope = {
+const envelope = {
   status: "error",
   output: null,
   raw: "sdk harness stub: stage execution not yet implemented",
@@ -41,6 +16,6 @@ const envelope: StageResultEnvelope = {
   model: "",
   error_kind: "structured_error",
   elapsed_ms: 0,
-};
+} as const;
 
 console.log(JSON.stringify(envelope));
