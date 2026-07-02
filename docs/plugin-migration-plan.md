@@ -258,7 +258,7 @@ GitHub Action: bats suites + shellcheck + a smoke test that installs the marketp
 
 | Risk | Mitigation |
 |---|---|
-| Skill name changes (`explore` → `pipeline-core:explore`) break muscle memory / cross-references | Grep all SKILL.md + orchestrator prompts for skill invocations in Phase 1; short names still resolve when unambiguous |
+| Skill name changes (`explore` → `pipeline-core:explore`) break muscle memory / cross-references | **RESOLVED (Phase 1 pilot):** all 22 core skills + 6 agents load namespaced via `--plugin-dir` in a live session; guard-deploy hook blocked a test command with the shipped script's message. Cross-references rewritten. |
 | Orchestrator hardcodes `.claude/scripts/` paths | Central `PIPELINE_ROOT` variable resolved from `${CLAUDE_PLUGIN_ROOT}`, single change point |
 | Consumers with `.claude/local/` customisations | They migrate to project-level `.claude/skills/` (native merge); document in CHANGELOG |
 | Unverified: can a same-name project skill cleanly take over from a namespaced plugin skill? (§5, deep-rewrite case) | Explicit test in Phase 3 pilot; fallback is config-driven branching in the core skill or a pinned plugin version |
@@ -276,3 +276,5 @@ GitHub Action: bats suites + shellcheck + a smoke test that installs the marketp
 
 ---
 *Total estimated effort: ~3.5 days with Claude Code doing the mechanical work, phased so the pipeline stays usable throughout.*
+
+**Phase 1 status (2026-07-02): complete on `feat/plugin-marketplace`.** Full bats verification against a pristine-main baseline: zero regressions; three pre-existing upstream test failures fixed in passing; remaining reds reproduce identically on main (documented in the Phase 1 commit message).

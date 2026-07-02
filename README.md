@@ -1,5 +1,16 @@
 # Claude Pipeline
 
+> **⚠️ v2.0 (this branch): plugin marketplace layout.** The `.claude/` copy-into-project
+> distribution is replaced by Claude Code plugins. Install:
+> ```
+> /plugin marketplace add stevegrocott/claude-pipeline
+> /plugin install pipeline-core@claude-pipeline
+> ```
+> Optional stack packs: `pipeline-frontend`, `pipeline-fastify`. Per-project config
+> lives in `.claude/config/platform.sh` (committed to your repo). Methodology skills
+> (TDD, debugging, planning) come from the [superpowers plugin](https://github.com/obra/superpowers)
+> rather than being vendored. Migration rationale and asset map: `docs/plugin-migration-plan.md`.
+
 > Forked from [aaddrick/claude-pipeline](https://github.com/aaddrick/claude-pipeline) — a portable `.claude/` folder for structured Claude Code development workflows.
 
 This fork modifies the pipeline to use **issues as the single source of truth** for plans and tasks. Instead of generating local plan files during implementation, plans are written to issues during a discovery phase and read back during implementation. Supports GitHub Issues and Jira (via ACLI), with GitHub and GitLab for git hosting.
