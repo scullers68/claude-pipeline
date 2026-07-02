@@ -1,0 +1,26 @@
+name: stage-runner (nightly)
+# The watchdog/supervision test file exceeds 5 hours serially on shared
+# runners (cancelled at budget twice). Coverage moves to a nightly run and
+# on-demand dispatch; every other suite runs per-push. This file is the
+# primary retirement target of the Agent SDK rewrite (fork issue #5).
+on:
+  schedule:
+    - cron: '17 14 * * *'
+  workflow_dispatch:
+env:
+  GIT_AUTHOR_NAME: ci
+  GIT_AUTHOR_EMAIL: ci@invalid.local
+  GIT_COMMITTER_NAME: ci
+  GIT_COMMITTER_EMAIL: ci@invalid.local
+jobs:
+  stage-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/plugin-marketplace
+      - name: Install bats
+        run: sudo apt-get update -q && sudo apt-get install -y bats jq
+      - name: Run stage-runner through known-reds gate
+        run: bash tests/ci-run.sh tests/implement-issue-test/test-stage-runner.bats
