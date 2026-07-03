@@ -17,7 +17,7 @@
 import { createStageResult } from "./stage-result";
 import { runStage } from "./stage-runner";
 
-function emitErrorResult(raw: string): void {
+function logErrorResult(raw: string): void {
   console.log(
     JSON.stringify(
       createStageResult({
@@ -27,7 +27,6 @@ function emitErrorResult(raw: string): void {
       }),
     ),
   );
-  process.exitCode = 1;
 }
 
 async function main(): Promise<void> {
@@ -37,7 +36,8 @@ async function main(): Promise<void> {
   const timeoutMs = Number(process.env.STAGE_TIMEOUT ?? 900_000);
 
   if (!prompt || !schemaPath) {
-    emitErrorResult("sdk harness: STAGE_PROMPT and STAGE_SCHEMA are required");
+    logErrorResult("sdk harness: STAGE_PROMPT and STAGE_SCHEMA are required");
+    process.exitCode = 1;
     return;
   }
 
@@ -53,7 +53,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  emitErrorResult(
+  logErrorResult(
     `sdk harness: ${err instanceof Error ? err.message : String(err)}`,
   );
+  process.exitCode = 1;
 });

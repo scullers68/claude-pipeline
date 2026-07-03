@@ -7,10 +7,10 @@ export async function writeJsonAtomically<T>(
   filePath: string,
   data: T,
 ): Promise<void> {
-  const dir = path.dirname(filePath);
+  const { dir, base } = path.parse(filePath);
   const tmpPath = path.join(
     dir,
-    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
+    `.${base}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
   );
 
   const content = `${JSON.stringify(data, null, 2)}${os.EOL}`;

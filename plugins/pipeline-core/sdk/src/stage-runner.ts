@@ -63,11 +63,11 @@ function detectRateLimit(parsed: Record<string, unknown> | null): boolean {
   if (!parsed) return false;
   const structured = parsed.structured_output as Record<string, unknown> | undefined;
   const status = structured?.status;
-  if (status === "success") return false;
   if (status === "rate_limit") return true;
+  if (status === "success") return false;
   if (parsed.is_error !== true) return false;
-  const result = typeof parsed.result === "string" ? parsed.result : "";
-  return RATE_LIMIT_RE.test(result);
+  if (typeof parsed.result !== "string") return false;
+  return RATE_LIMIT_RE.test(parsed.result);
 }
 
 /** Mirrors _extract_denials(): permission_denials[].tool_name, or []. */

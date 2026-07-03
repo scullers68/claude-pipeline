@@ -75,9 +75,7 @@ function nextModel(model: string): string {
  * and any unknown tier pinned at the opus ceiling.
  */
 function nextModelUp(model: string): string {
-  if (model === "haiku") return "sonnet";
-  if (model === "sonnet") return "opus";
-  return "opus";
+  return model === "haiku" ? "sonnet" : "opus";
 }
 
 /** decide-retry.sh _max_retries: same-tier retry budget per error class. */
