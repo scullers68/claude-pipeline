@@ -39,8 +39,28 @@ jobs:
             ! -name 'test-stage-runner.bats' ! -name 'test-timeout-escalation.bats' \
             ! -name 'test-merge-pr-timeouts.bats' ! -name 'test-rate-limit.bats' \
             ! -name 'test-merge-block-convergence.bats' ! -name 'test-soft-fail-convergence.bats' \
-            ! -name 'test-integration.bats' | sort)
+            ! -name 'test-integration.bats' ! -name 'test-sdk-harness.bats' | sort)
           bash tests/ci-run.sh "${files[@]}"
+
+  sdk-harness:
+    name: SDK harness (parity, blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install bats
+        run: sudo apt-get update -q && sudo apt-get install -y bats jq
+      - name: Build SDK harness
+        run: npm ci && npm run build
+        working-directory: plugins/pipeline-core/sdk
+      - name: SDK unit tests
+        run: npm test
+        working-directory: plugins/pipeline-core/sdk
+      - name: SDK harness parity suite
+        run: bash tests/ci-run.sh tests/implement-issue-test/test-sdk-harness.bats
 
   orchestrator-timers:
     name: Timer file ${{ matrix.file }} (known-reds gated)
