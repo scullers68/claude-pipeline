@@ -151,31 +151,21 @@ export function createInitialStatus(params: {
   // triage, and validate_plan get started_at/completed_at up front. The
   // other stages gain those keys later, when set_stage_started() /
   // set_stage_completed() first touch them.
-  const stages: Record<string, StageEntry> = {
-    parse_issue: { status: "pending", started_at: null, completed_at: null },
-    triage: {
-      status: "pending",
-      started_at: null,
-      completed_at: null,
-      route: null,
-      confidence: null,
-      disqualifying_criterion: null,
-    },
-    validate_plan: { status: "pending", started_at: null, completed_at: null },
-    implement: { status: "pending", task_progress: "0/0" },
-    quality_loop: { status: "pending", iteration: 0 },
-    test_loop: { status: "pending", iteration: 0 },
-    e2e_verify: { status: "pending" },
-    acceptance_test: { status: "pending" },
-    deploy_verify: { status: "pending" },
-    docs: { status: "pending" },
-    pr: { status: "pending" },
-    pr_review: { status: "pending", iteration: 0 },
-    complete: { status: "pending" },
-    fast_path_implement: { status: "pending" },
-    fast_path_pr: { status: "pending" },
-    fast_path_merge: { status: "pending" },
+  const stageDefaults: Record<string, Partial<StageEntry>> = {
+    parse_issue: { started_at: null, completed_at: null },
+    triage: { started_at: null, completed_at: null, route: null, confidence: null, disqualifying_criterion: null },
+    validate_plan: { started_at: null, completed_at: null },
+    implement: { task_progress: "0/0" },
+    quality_loop: { iteration: 0 },
+    test_loop: { iteration: 0 },
+    pr_review: { iteration: 0 },
   };
+
+  const stages: Record<string, StageEntry> = {};
+  for (const key of STAGE_KEYS) {
+    const defaults = stageDefaults[key] || {};
+    stages[key] = { status: "pending", ...defaults };
+  }
 
   return {
     state: "initializing",

@@ -13,6 +13,7 @@ export async function writeJsonAtomically<T>(
     `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
   );
 
-  await fs.writeFile(tmpPath, JSON.stringify(data, null, 2) + os.EOL, "utf8");
+  const content = `${JSON.stringify(data, null, 2)}${os.EOL}`;
+  await fs.writeFile(tmpPath, content, "utf8");
   await fs.rename(tmpPath, filePath);
 }

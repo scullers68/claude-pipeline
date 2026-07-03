@@ -17,29 +17,35 @@
 import { createStageResult } from "./stage-result";
 import { runStage } from "./stage-runner";
 
+function emitErrorResult(raw: string): void {
+  console.log(
+    JSON.stringify(
+      createStageResult({
+        status: "error",
+        error_kind: "structured_error",
+        raw,
+      }),
+    ),
+  );
+  process.exitCode = 1;
+}
+
 async function main(): Promise<void> {
   const prompt = process.env.STAGE_PROMPT;
   const schemaPath = process.env.STAGE_SCHEMA;
+  const model = process.env.STAGE_MODEL ?? "sonnet";
+  const timeoutMs = Number(process.env.STAGE_TIMEOUT ?? 900_000);
 
   if (!prompt || !schemaPath) {
-    console.log(
-      JSON.stringify(
-        createStageResult({
-          status: "error",
-          error_kind: "structured_error",
-          raw: "sdk harness: STAGE_PROMPT and STAGE_SCHEMA are required",
-        }),
-      ),
-    );
-    process.exitCode = 1;
+    emitErrorResult("sdk harness: STAGE_PROMPT and STAGE_SCHEMA are required");
     return;
   }
 
   const result = await runStage({
     prompt,
-    model: process.env.STAGE_MODEL ?? "sonnet",
+    model,
     schemaPath,
-    timeoutMs: Number(process.env.STAGE_TIMEOUT ?? 900_000),
+    timeoutMs,
   });
 
   console.log(JSON.stringify(result));
@@ -47,14 +53,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.log(
-    JSON.stringify(
-      createStageResult({
-        status: "error",
-        error_kind: "structured_error",
-        raw: `sdk harness: ${err instanceof Error ? err.message : String(err)}`,
-      }),
-    ),
+  emitErrorResult(
+    `sdk harness: ${err instanceof Error ? err.message : String(err)}`,
   );
-  process.exitCode = 1;
 });

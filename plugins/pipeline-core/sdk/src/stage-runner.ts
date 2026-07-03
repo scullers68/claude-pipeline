@@ -112,8 +112,8 @@ export async function runStage(opts: RunStageOptions): Promise<StageResult> {
   // Validate the schema file exists before spawning — run_stage's first guard.
   let schema: string;
   try {
-    const raw = await fs.readFile(opts.schemaPath, "utf8");
-    schema = JSON.stringify(JSON.parse(raw));
+    schema = await fs.readFile(opts.schemaPath, "utf8");
+    JSON.parse(schema);
   } catch {
     return createStageResult({
       status: "error",
@@ -234,7 +234,7 @@ function spawnSession(
 
     const chunks: string[] = [];
     let timedOut = false;
-    let aborted = false;
+    let abortReason: unknown;
     let killTimer: NodeJS.Timeout | undefined;
 
     const kill = () => {
@@ -250,7 +250,7 @@ function spawnSession(
     }, opts.timeoutMs);
 
     const onAbort = () => {
-      aborted = true;
+      abortReason = opts.signal?.reason;
       kill();
     };
     if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });
@@ -267,13 +267,13 @@ function spawnSession(
     child.on("error", () => {
       // spawn failure surfaced asynchronously (e.g. ENOENT).
       cleanup();
-      if (aborted) reject(abortError(opts.signal?.reason));
+      if (abortReason !== undefined) reject(abortError(abortReason));
       else resolve({ raw: chunks.join(""), timedOut });
     });
 
     child.on("close", () => {
       cleanup();
-      if (aborted && !timedOut) reject(abortError(opts.signal?.reason));
+      if (abortReason !== undefined && !timedOut) reject(abortError(abortReason));
       else resolve({ raw: chunks.join(""), timedOut });
     });
   });
