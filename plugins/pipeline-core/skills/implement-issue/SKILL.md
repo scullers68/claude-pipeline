@@ -44,22 +44,41 @@ End-to-end issue implementation — reads plan from issue tracker, implements wi
 
 ## Invocation
 
-Immediately launch the orchestrator:
+Immediately launch the orchestrator. Which implementation runs is selected
+by `ORCHESTRATOR_ENGINE` (set in `.claude/config/platform.sh`, default
+`bash`):
 
-```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/implement-issue-orchestrator.sh \
-  --issue $ISSUE_NUMBER \
-  --branch $BASE_BRANCH
-```
+- `ORCHESTRATOR_ENGINE=bash` (default) — the battle-tested bash state
+  machine. Leaving the flag unset is byte-identical to prior behaviour:
 
-Or with explicit agent override:
+  ```bash
+  ${CLAUDE_PLUGIN_ROOT}/scripts/implement-issue-orchestrator.sh \
+    --issue $ISSUE_NUMBER \
+    --branch $BASE_BRANCH
+  ```
 
-```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/implement-issue-orchestrator.sh \
-  --issue $ISSUE_NUMBER \
-  --branch $BASE_BRANCH \
-  --agent bulletproof-frontend-developer
-```
+  Or with explicit agent override:
+
+  ```bash
+  ${CLAUDE_PLUGIN_ROOT}/scripts/implement-issue-orchestrator.sh \
+    --issue $ISSUE_NUMBER \
+    --branch $BASE_BRANCH \
+    --agent bulletproof-frontend-developer
+  ```
+
+- `ORCHESTRATOR_ENGINE=sdk` — the TypeScript Agent SDK harness (side-by-side
+  migration, issue #11). Routes to `ORCHESTRATOR_SDK_ENTRY`, which defaults
+  to `${CLAUDE_PLUGIN_ROOT}/sdk/dist/index.js`:
+
+  ```bash
+  node "${ORCHESTRATOR_SDK_ENTRY:-${CLAUDE_PLUGIN_ROOT}/sdk/dist/index.js}" \
+    --issue $ISSUE_NUMBER \
+    --branch $BASE_BRANCH
+  ```
+
+  The sdk engine shells out to the same `decide-*.sh` policy backends and
+  honours the same schemas and `status.json` contract as the bash engine —
+  monitoring, logging, and exit codes below apply to both.
 
 ## Monitoring
 
