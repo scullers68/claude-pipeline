@@ -130,6 +130,22 @@ FORMAT_CMD="${FORMAT_CMD:-}"
 # The orchestrator injects this file into agent prompts when it exists.
 PLATFORM_CONTEXT_FILE="${PLATFORM_CONTEXT_FILE:-.claude/config/context.md}"
 
+# Orchestrator engine — selects which implementation runs the issue state
+# machine (see plugins/pipeline-core/skills/implement-issue/SKILL.md
+# "Invocation" for the dispatch logic).
+#   bash (default) — the battle-tested bash state machine
+#     (scripts/implement-issue-orchestrator.sh). Leaving this unset/bash is
+#     byte-identical to pre-#11 behaviour; that script is not modified by
+#     the sdk migration.
+#   sdk — routes to the TypeScript Agent SDK harness under
+#     plugins/pipeline-core/sdk (side-by-side migration, issue #11). Shells
+#     out to the same decide-*.sh policy backends and honours the same
+#     schemas/status.json contract as the bash engine.
+ORCHESTRATOR_ENGINE="${ORCHESTRATOR_ENGINE:-bash}"        # bash | sdk
+# Entry point invoked when ORCHESTRATOR_ENGINE=sdk (built by `npm run build`
+# in plugins/pipeline-core/sdk). Unused when ORCHESTRATOR_ENGINE=bash.
+ORCHESTRATOR_SDK_ENTRY="${ORCHESTRATOR_SDK_ENTRY:-${CLAUDE_PLUGIN_ROOT:-plugins/pipeline-core}/sdk/dist/index.js}"
+
 # Orchestrator iteration limits (override defaults from implement-issue-orchestrator.sh)
 MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"
 MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
