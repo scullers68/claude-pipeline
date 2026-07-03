@@ -134,7 +134,7 @@ export const STATUS_FILE_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-function isoNow(): string {
+export function isoNow(): string {
   // jq's `now | todate` emits RFC3339 UTC with second precision, e.g.
   // "2026-07-03T12:00:00Z" — match that instead of Date#toISOString's
   // millisecond-precision output so SDK and bash timestamps are comparable.
