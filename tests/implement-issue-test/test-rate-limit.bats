@@ -90,6 +90,67 @@ teardown() {
 }
 
 # =============================================================================
+# DETECT_SESSION_LIMIT (issue #13)
+# A Claude session-limit 429 (api_error_status == 429 plus a "session limit" /
+# "resets <time>" result) is unretriable — distinct from a transient rate
+# limit. It must be classified as session_limit and short-circuit before the
+# generic rate-limit / diagnostic-fallback retry path.
+# =============================================================================
+
+@test "detect_session_limit true for api_error_status 429 + session limit result" {
+    local output
+    output='{"is_error":true,"api_error_status":429,'
+    output+='"result":"You'\''ve hit your session limit · resets 2pm (Australia/Melbourne)",'
+    output+='"num_turns":1,"output_tokens":0}'
+    run detect_session_limit "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect_session_limit true when result mentions resets (no literal 'session limit')" {
+    local output='{"is_error":true,"api_error_status":429,"result":"Limit reached · resets 9am"}'
+    run detect_session_limit "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect_session_limit false for a transient 429 without session-limit wording" {
+    local output='{"is_error":true,"api_error_status":429,"result":"HTTP 429: Too Many Requests"}'
+    run detect_session_limit "$output"
+    [ "$status" -eq 1 ]
+}
+
+@test "detect_session_limit false when api_error_status is not 429" {
+    local output='{"is_error":true,"api_error_status":500,"result":"You hit your session limit · resets 2pm"}'
+    run detect_session_limit "$output"
+    [ "$status" -eq 1 ]
+}
+
+@test "detect_session_limit false when api_error_status is absent" {
+    local output='{"is_error":true,"result":"session limit reached, resets soon"}'
+    run detect_session_limit "$output"
+    [ "$status" -eq 1 ]
+}
+
+@test "run_stage detects session limit before the generic rate-limit branch" {
+    local func_def
+    func_def=$(declare -f run_stage)
+
+    [[ "$func_def" == *"detect_session_limit"* ]] \
+        || fail "run_stage lacks detect_session_limit"
+
+    # The session-limit branch must be evaluated ahead of detect_rate_limit so
+    # a session-limit 429 never falls into the retriable rate-limit path.
+    local session_line rate_line
+    session_line=$(printf '%s\n' "$func_def" \
+        | grep -n "detect_session_limit" | head -1 | cut -d: -f1)
+    rate_line=$(printf '%s\n' "$func_def" \
+        | grep -n "detect_rate_limit" | head -1 | cut -d: -f1)
+    [ -n "$session_line" ] && [ -n "$rate_line" ] \
+        || fail "could not locate both detection branches"
+    (( session_line < rate_line )) \
+        || fail "detect_session_limit ($session_line) not before detect_rate_limit ($rate_line)"
+}
+
+# =============================================================================
 # EXTRACT_WAIT_TIME
 # =============================================================================
 

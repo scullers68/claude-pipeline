@@ -315,6 +315,111 @@ _stage_result_success_no_output_status() {
 }
 
 # ===========================================================================
+# (session-limit) error_kind=session_limit → pause  (issue #13)
+# A Claude session-limit 429 is unretriable and NOT a task failure. It must
+# route to a distinct "pause" action: neither retry_same/escalate (which would
+# consume the per-task retry budget) nor bail (which would mark the task
+# failed).
+# ===========================================================================
+
+# A stage_result envelope carrying the session-limit classification, as the
+# orchestrator builds it after detect_session_limit fires.
+_stage_result_session_limit() {
+	printf '%s' \
+		'{"status":"error","output":null,' \
+		'"raw":"You hit your session limit · resets 2pm",' \
+		'"denials":[],"model":"haiku",' \
+		'"error_kind":"session_limit","elapsed_ms":100}'
+}
+
+@test "(S1) session_limit → pause action (bash backend)" {
+	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
+		|| fail "decide-action.sh not present or not executable"
+
+	local stage_result history
+	stage_result=$(_stage_result_session_limit)
+	history=$(_history_empty)
+
+	ESCALATION_POLICY_BACKEND=bash run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$stage_result" "$history"
+
+	[ "$status" -eq 0 ]
+
+	local action
+	action=$(printf '%s' "$output" | jq -r '.action')
+	[[ "$action" == "pause" ]] || {
+		printf 'FAIL: expected pause, got: %s\n' "$action" >&2
+		printf 'Stdout: %s\n' "$output" >&2
+		return 1
+	}
+}
+
+@test "(S2) session_limit → pause action (compose backend, no skill call)" {
+	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
+		|| fail "decide-action.sh not present or not executable"
+
+	# Tripwire: the session-limit short-circuit must fire before any
+	# delegation to decide-retry.sh, so the mock claude must never run.
+	install_mock_claude
+	set_mock_claude_output 'TRIPWIRE-SKILL-WAS-INVOKED'
+	set_mock_claude_exit 1
+
+	local stage_result history
+	stage_result=$(_stage_result_session_limit)
+	history=$(_history_empty)
+
+	run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$stage_result" "$history"
+
+	[ "$status" -eq 0 ]
+
+	local action
+	action=$(printf '%s' "$output" | jq -r '.action')
+	[[ "$action" == "pause" ]] || {
+		printf 'FAIL: expected pause, got: %s\n' "$action" >&2
+		return 1
+	}
+
+	if [[ "$output" == *"TRIPWIRE-SKILL-WAS-INVOKED"* ]]; then
+		printf 'FAIL: skill invoked despite session-limit short-circuit\n' >&2
+		return 1
+	fi
+}
+
+@test "(S3) session_limit is neither retriable nor bail (retry budget preserved)" {
+	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
+		|| fail "decide-action.sh not present or not executable"
+
+	local stage_result history
+	stage_result=$(_stage_result_session_limit)
+	history=$(_history_empty)
+
+	ESCALATION_POLICY_BACKEND=bash run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$stage_result" "$history"
+
+	[ "$status" -eq 0 ]
+
+	local action
+	action=$(printf '%s' "$output" | jq -r '.action')
+	case "$action" in
+		retry_same|escalate|bail)
+			printf 'FAIL: session_limit produced a budget-consuming action: %s\n' \
+				"$action" >&2
+			return 1
+			;;
+	esac
+	[[ "$action" == "pause" ]]
+
+	# The reason must be non-empty for downstream logging.
+	local reason
+	reason=$(printf '%s' "$output" | jq -r '.reason')
+	[[ -n "$reason" && "$reason" != "null" ]] || {
+		printf 'FAIL: expected non-empty reason, got: %s\n' "$reason" >&2
+		return 1
+	}
+}
+
+# ===========================================================================
 # (6) _compose_decide: unexpected retry_action value returns non-zero
 # ===========================================================================
 

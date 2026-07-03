@@ -1386,6 +1386,30 @@ detect_rate_limit() {
     return 1
 }
 
+# Detect a Claude *session-limit* 429 — distinct from a transient rate limit.
+# The envelope carries api_error_status == 429 together with a result string
+# naming the session limit / its reset time, e.g.:
+#   {"is_error":true,"api_error_status":429,
+#    "result":"You've hit your session limit · resets 2pm (Australia/Melbourne)"}
+# No retry can clear this before the reset, so it must NOT be treated as a
+# retriable rate limit and must NOT consume the per-task retry budget.
+# Returns 0 (true) when the session-limit signal is present, 1 otherwise.
+detect_session_limit() {
+    local output="$1"
+
+    # Gate on the structured api_error_status field, not the result text — a
+    # transient 429 that merely mentions "429" in prose must not qualify.
+    local api_status
+    api_status=$(printf '%s' "$output" \
+        | jq -r '.api_error_status // empty' 2>/dev/null)
+    [[ "$api_status" == "429" ]] || return 1
+
+    # Confirm the result names the session limit or its reset time.
+    local result
+    result=$(printf '%s' "$output" | jq -r '.result // empty' 2>/dev/null)
+    printf '%s' "$result" | grep -qiE 'session limit|resets'
+}
+
 extract_wait_time() {
     local output="$1"
     local result
@@ -1615,6 +1639,16 @@ _apply_stage_action() {
 			# the retry loop (same model) via the escalation-policy skill.
 			printf '%s\n' "$stage_result"
 			return 0
+			;;
+		pause)
+			# Session-limit 429: unretriable and NOT a task failure. Emit the
+			# envelope unchanged and signal a terminal result via a non-zero
+			# return WITHOUT set_stage_failed, so status.json keeps its true
+			# last-good state (no false "failed" marks). The resumable paused-
+			# state persistence lives in the session-limit halt path.
+			log_warn "Stage paused (session limit): ${reason:-action=pause}"
+			printf '%s\n' "$stage_result"
+			return 1
 			;;
 		*)
 			log_error "_apply_stage_action: unknown action '$action'"
@@ -2111,6 +2145,16 @@ for m in re.finditer(r'\[\s*\{', t):
             | head -1)
         log_error "Stage $stage_name — agent not found: ${_agent_name:-unknown}"
         _error_kind="agent_not_found"
+    elif detect_session_limit "$output"; then
+        # Session-limit 429: unretriable and NOT a task failure. Classify it
+        # distinctly so decide-action.sh routes it to a pause rather than a
+        # retry/escalate that would burn the per-task retry budget. This branch
+        # is deliberately ordered before detect_rate_limit and the generic
+        # diagnostic-fallback path so a session-limit 429 short-circuits both.
+        # No sleep here (unlike handle_rate_limit) — the run halts for resume.
+        log_warn "Stage $stage_name hit Claude session limit" \
+            "(api_error_status=429) — pausing, not retrying"
+        _error_kind="session_limit"
     elif detect_rate_limit "$output"; then
         handle_rate_limit "$output" "$model"
         _error_kind="rate_limit"
@@ -2377,6 +2421,19 @@ for m in re.finditer(r'\[\s*\{', t):
                     "$(( $(_epoch_ms) - result_start_ms ))")
             fi
             _apply_stage_action "$_sr_retry" "retry_same" "$_da_reason"
+            return $?
+            ;;
+        pause)
+            # Session-limit 429: terminal for this run but NOT a task failure.
+            # Do NOT record_escalation (that would consume the per-task retry
+            # budget) and do NOT mark the task failed. Break the consecutive-
+            # timeout streak like any non-timeout outcome, then hand the
+            # unchanged envelope to _apply_stage_action, which signals a
+            # terminal-but-not-failed result. Resumable paused-state
+            # persistence is handled by the session-limit halt path.
+            _CONSECUTIVE_TIMEOUTS=0
+            _TIMED_OUT_STAGE_NAMES=""
+            _apply_stage_action "$_sr_interim" "pause" "$_da_reason"
             return $?
             ;;
         *)

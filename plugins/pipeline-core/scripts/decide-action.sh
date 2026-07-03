@@ -74,6 +74,16 @@ _bash_decide() {
 		return 0
 	fi
 
+	# session-limit 429 → pause: unretriable and NOT a task failure. It must
+	# neither retry/escalate (which would consume the per-task retry budget)
+	# nor bail (which would mark the task failed). Handled here so it never
+	# reaches the retry/escalate tree below.
+	if [[ "$error_kind" == "session_limit" ]]; then
+		printf '%s\n' \
+			'{"action":"pause","reason":"session_limit: unretriable 429, pausing without consuming retry budget"}'
+		return 0
+	fi
+
 	# unrecoverable configuration or permission error → bail
 	if [[ "$error_kind" == "permission_denied" || \
 	      "$error_kind" == "schema_not_found" || \
@@ -194,6 +204,15 @@ _compose_decide() {
 	if [[ "$status" == "success" ]]; then
 		printf '%s\n' \
 			'{"action":"accept","reason":"stage completed successfully"}'
+		return 0
+	fi
+
+	# session-limit 429 → pause: unretriable and NOT a task failure. Short-
+	# circuit before delegating to decide-retry.sh so it neither consumes the
+	# per-task retry budget nor bails (which would mark the task failed).
+	if [[ "$error_kind" == "session_limit" ]]; then
+		printf '%s\n' \
+			'{"action":"pause","reason":"session_limit: unretriable 429, pausing without consuming retry budget"}'
 		return 0
 	fi
 
