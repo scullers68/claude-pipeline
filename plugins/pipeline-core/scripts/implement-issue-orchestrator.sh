@@ -807,6 +807,34 @@ set_final_state() {
         "to_state=$state"
 }
 
+# set_paused_state <reset_time>
+# Persist a resumable paused state on a Claude session-limit 429. Unlike
+# set_stage_failed (which sets .state="failed" and marks the stage errored),
+# this records .state="paused" plus the limit's reset time and touches NOTHING
+# else — .tasks and .stages are left exactly as they were, so every prior
+# completion survives and NO task is marked failed. A later --resume run reads
+# .session_limit_reset to know when the limit clears and continues from here.
+set_paused_state() {
+    local reset_time="${1:-}"
+    local prev_state stage
+    prev_state=$(jq -r '.state // "running"' "$STATUS_FILE" 2>/dev/null) \
+        || prev_state="running"
+    stage=$(jq -r '.current_stage // "unknown"' "$STATUS_FILE" 2>/dev/null) \
+        || stage="unknown"
+
+    jq --arg reset "$reset_time" \
+       '.state = "paused" |
+        .paused_reason = "session_limit" |
+        .session_limit_reset = (if $reset == "" then null else $reset end) |
+        .last_update = (now | todate)' \
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    sync_status_to_log
+    emit_event "status_change" \
+        "stage=$stage" \
+        "from_state=$prev_state" \
+        "to_state=paused"
+}
+
 increment_quality_iteration() {
     jq '.quality_iterations += 1 |
         .stages.quality_loop.iteration = .quality_iterations |
@@ -1386,6 +1414,50 @@ detect_rate_limit() {
     return 1
 }
 
+# Detect a Claude *session-limit* 429 — distinct from a transient rate limit.
+# The envelope carries api_error_status == 429 together with a result string
+# naming the session limit / its reset time, e.g.:
+#   {"is_error":true,"api_error_status":429,
+#    "result":"You've hit your session limit · resets 2pm (Australia/Melbourne)"}
+# No retry can clear this before the reset, so it must NOT be treated as a
+# retriable rate limit and must NOT consume the per-task retry budget.
+# Returns 0 (true) when the session-limit signal is present, 1 otherwise.
+detect_session_limit() {
+    local output="$1"
+
+    # Gate on the structured api_error_status field, not the result text — a
+    # transient 429 that merely mentions "429" in prose must not qualify.
+    local api_status
+    api_status=$(printf '%s' "$output" \
+        | jq -r '.api_error_status // empty' 2>/dev/null)
+    [[ "$api_status" == "429" ]] || return 1
+
+    # Confirm the result names the session limit or its reset time.
+    local result
+    result=$(printf '%s' "$output" | jq -r '.result // empty' 2>/dev/null)
+    printf '%s' "$result" | grep -qiE 'session limit|resets'
+}
+
+# extract_reset_time <output>
+# Parse the reset time named in a Claude session-limit 429 result string, e.g.
+# "You've hit your session limit · resets 2pm (Australia/Melbourne)" yields
+# "2pm (Australia/Melbourne)". The printed descriptor lets set_paused_state
+# record when a resume can succeed. Prints an empty string when no reset time
+# is named. Uses a bash regex (no GNU-only sed flags) to stay portable on macOS.
+extract_reset_time() {
+    local output="$1"
+    local result
+    result=$(printf '%s' "$output" | jq -r '.result // empty' 2>/dev/null)
+
+    local reset=""
+    if [[ "$result" =~ [Rr]esets[[:space:]]+(.+)$ ]]; then
+        reset="${BASH_REMATCH[1]}"
+        # Trim trailing whitespace left by the greedy capture.
+        reset="${reset%"${reset##*[![:space:]]}"}"
+    fi
+    printf '%s' "$reset"
+}
+
 extract_wait_time() {
     local output="$1"
     local result
@@ -1615,6 +1687,16 @@ _apply_stage_action() {
 			# the retry loop (same model) via the escalation-policy skill.
 			printf '%s\n' "$stage_result"
 			return 0
+			;;
+		pause)
+			# Session-limit 429: unretriable and NOT a task failure. Emit the
+			# envelope unchanged and signal a terminal result via a non-zero
+			# return WITHOUT set_stage_failed, so status.json keeps its true
+			# last-good state (no false "failed" marks). The resumable paused-
+			# state persistence lives in the session-limit halt path.
+			log_warn "Stage paused (session limit): ${reason:-action=pause}"
+			printf '%s\n' "$stage_result"
+			return 1
 			;;
 		*)
 			log_error "_apply_stage_action: unknown action '$action'"
@@ -2111,6 +2193,16 @@ for m in re.finditer(r'\[\s*\{', t):
             | head -1)
         log_error "Stage $stage_name — agent not found: ${_agent_name:-unknown}"
         _error_kind="agent_not_found"
+    elif detect_session_limit "$output"; then
+        # Session-limit 429: unretriable and NOT a task failure. Classify it
+        # distinctly so decide-action.sh routes it to a pause rather than a
+        # retry/escalate that would burn the per-task retry budget. This branch
+        # is deliberately ordered before detect_rate_limit and the generic
+        # diagnostic-fallback path so a session-limit 429 short-circuits both.
+        # No sleep here (unlike handle_rate_limit) — the run halts for resume.
+        log_warn "Stage $stage_name hit Claude session limit" \
+            "(api_error_status=429) — pausing, not retrying"
+        _error_kind="session_limit"
     elif detect_rate_limit "$output"; then
         handle_rate_limit "$output" "$model"
         _error_kind="rate_limit"
@@ -2377,6 +2469,22 @@ for m in re.finditer(r'\[\s*\{', t):
                     "$(( $(_epoch_ms) - result_start_ms ))")
             fi
             _apply_stage_action "$_sr_retry" "retry_same" "$_da_reason"
+            return $?
+            ;;
+        pause)
+            # Session-limit 429: terminal for this run but NOT a task failure.
+            # Do NOT record_escalation (that would consume the per-task retry
+            # budget) and do NOT mark the task failed. Break the consecutive-
+            # timeout streak like any non-timeout outcome, then persist a
+            # resumable paused state (state=paused + the limit's reset time)
+            # BEFORE handing the unchanged envelope to _apply_stage_action.
+            # set_paused_state leaves .tasks/.stages intact, so every prior
+            # completion survives and a --resume run continues from here once
+            # the limit clears.
+            _CONSECUTIVE_TIMEOUTS=0
+            _TIMED_OUT_STAGE_NAMES=""
+            set_paused_state "$(extract_reset_time "$output")"
+            _apply_stage_action "$_sr_interim" "pause" "$_da_reason"
             return $?
             ;;
         *)
@@ -4260,9 +4368,25 @@ Commit your changes with a descriptive message."
 				"$task_agent" "$task_size")
 		fi
 
-		local impl_status
+		local impl_status impl_error_kind
 		impl_status=$(printf '%s' "$impl_result" \
 			| jq -r '.output.status')
+		impl_error_kind=$(printf '%s' "$impl_result" \
+			| jq -r '.error_kind // empty')
+
+		# Session limit: halt resumably. Do NOT burn further attempts or mark
+		# the task failed — record a paused result so the collector leaves the
+		# task's state intact for a later --resume. run_stage already flipped
+		# status.json to state=paused with the reset time.
+		if [[ "$impl_error_kind" == "session_limit" ]]; then
+			log_warn \
+				"Task $task_id paused on Claude session limit" \
+				"(attempt $review_attempts) — halting for resume"
+			printf '%s' \
+				"{\"status\":\"paused\",\"review_attempts\":$review_attempts}" \
+				> "$result_file"
+			return 0
+		fi
 
 		if [[ "$impl_status" == "success" ]]; then
 			task_succeeded=true
@@ -4679,6 +4803,13 @@ execute_batch_parallel() {
 			failed+=("$tid")
 			cleanup_worktree "$wp" "$wb"
 			continue
+		elif [[ "$rstatus" == "paused" ]]; then
+			# Session limit: leave the task's state intact for --resume. It is
+			# neither completed nor failed, so it stays out of both arrays.
+			log_warn "Task $tid paused on session limit" \
+				"— left intact for resume (not marked failed)"
+			cleanup_worktree "$wp" "$wb"
+			continue
 		elif [[ "$rstatus" != "success" ]]; then
 			log_error "Task $tid failed in worktree" \
 				"(status: $rstatus)"
@@ -5021,6 +5152,7 @@ Commit your changes with a descriptive message."
 		max_attempts=$(get_max_review_attempts "$tsize")
 		local review_attempts=0
 		local task_succeeded=false
+		local task_paused=false
 
 		local base_timeout
 		base_timeout=$(get_stage_timeout \
@@ -5103,9 +5235,24 @@ Commit your changes with a descriptive message."
 					"$tagent" "$tsize")
 			fi
 
-			local impl_status
+			local impl_status impl_error_kind
 			impl_status=$(printf '%s' "$impl_result" \
 				| jq -r '.output.status')
+			impl_error_kind=$(printf '%s' "$impl_result" \
+				| jq -r '.error_kind // empty')
+
+			# Session limit: halt resumably. Do NOT burn further
+			# attempts or mark the task failed — record a paused
+			# result so the collector leaves the task's state intact
+			# for a later --resume. run_stage already flipped
+			# status.json to state=paused with the reset time.
+			if [[ "$impl_error_kind" == "session_limit" ]]; then
+				log_warn "Task $tid paused on session limit" \
+					"(attempt $review_attempts)" \
+					"— halting for resume"
+				task_paused=true
+				break
+			fi
 
 			if [[ "$impl_status" == "success" ]]; then
 				task_succeeded=true
@@ -5116,6 +5263,15 @@ Commit your changes with a descriptive message."
 				"$review_attempts/$max_attempts" \
 				"failed"
 		done
+
+		if [[ "$task_paused" == "true" ]]; then
+			# Neither completed nor failed — leave the task's state
+			# intact and record a paused result for --resume.
+			printf '%s' \
+				"{\"status\":\"paused\",\"review_attempts\":$review_attempts}" \
+				> "${LOG_BASE}/stages/task-${tid}-serial.log"
+			continue
+		fi
 
 		if [[ "$task_succeeded" == "true" ]]; then
 			# Quality loop
@@ -7400,7 +7556,29 @@ $impl_summary" "$tagent"
             if (( _impl_git_exit == 124 )); then
                 log_warn "implement: git checkout $branch timed out after ${IMPLEMENT_GIT_TIMEOUT}s"
             fi
+
+            # Session-limit halt: if a batch paused the run (state=paused,
+            # persisted by run_stage's pause path), stop launching further
+            # batches so none are marked failed. The current batch's
+            # completions are already recorded and preserved.
+            if [[ "$(jq -r '.state // ""' "$STATUS_FILE" 2>/dev/null)" == "paused" ]]; then
+                log_warn "Batch $batch_num paused on Claude session limit" \
+                    "— halting the run for resume"
+                break
+            fi
         done
+
+        # If the run paused on a session limit, exit resumably WITHOUT marking
+        # the implement stage complete or any task failed. status.json already
+        # records state=paused and the reset time; a --resume run continues
+        # once the limit clears.
+        if [[ "$(jq -r '.state // ""' "$STATUS_FILE" 2>/dev/null)" == "paused" ]]; then
+            log_warn "Run paused on Claude session limit —" \
+                "$completed_tasks/$task_count task(s) completed so far." \
+                "Resume once the limit resets."
+            sync_status_to_log
+            exit 0
+        fi
 
         set_stage_completed "implement"
         set_stage_completed "quality_loop"

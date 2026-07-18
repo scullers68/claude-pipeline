@@ -90,6 +90,186 @@ teardown() {
 }
 
 # =============================================================================
+# DETECT_SESSION_LIMIT (issue #13)
+# A Claude session-limit 429 (api_error_status == 429 plus a "session limit" /
+# "resets <time>" result) is unretriable — distinct from a transient rate
+# limit. It must be classified as session_limit and short-circuit before the
+# generic rate-limit / diagnostic-fallback retry path.
+# =============================================================================
+
+@test "detect_session_limit true for api_error_status 429 + session limit result" {
+    local output
+    output='{"is_error":true,"api_error_status":429,'
+    output+='"result":"You'\''ve hit your session limit · resets 2pm (Australia/Melbourne)",'
+    output+='"num_turns":1,"output_tokens":0}'
+    run detect_session_limit "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect_session_limit true when result mentions resets (no literal 'session limit')" {
+    local output='{"is_error":true,"api_error_status":429,"result":"Limit reached · resets 9am"}'
+    run detect_session_limit "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect_session_limit false for a transient 429 without session-limit wording" {
+    local output='{"is_error":true,"api_error_status":429,"result":"HTTP 429: Too Many Requests"}'
+    run detect_session_limit "$output"
+    [ "$status" -eq 1 ]
+}
+
+@test "detect_session_limit false when api_error_status is not 429" {
+    local output='{"is_error":true,"api_error_status":500,"result":"You hit your session limit · resets 2pm"}'
+    run detect_session_limit "$output"
+    [ "$status" -eq 1 ]
+}
+
+@test "detect_session_limit false when api_error_status is absent" {
+    local output='{"is_error":true,"result":"session limit reached, resets soon"}'
+    run detect_session_limit "$output"
+    [ "$status" -eq 1 ]
+}
+
+@test "extract_reset_time parses the reset descriptor from a 429 result" {
+    local output
+    output='{"is_error":true,"api_error_status":429,'
+    output+='"result":"You'\''ve hit your session limit · resets 2pm (Australia/Melbourne)"}'
+    run extract_reset_time "$output"
+    [ "$status" -eq 0 ]
+    [ "$output" = "2pm (Australia/Melbourne)" ]
+}
+
+@test "extract_reset_time returns empty when no reset time is named" {
+    local output='{"is_error":true,"api_error_status":429,"result":"Too many requests"}'
+    run extract_reset_time "$output"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# =============================================================================
+# SET_PAUSED_STATE (issue #13, halt-resumably task)
+# On a session-limit 429 the orchestrator must halt resumably: write
+# state=paused with the reset time while preserving completed-task state.
+# It must NOT mark any task failed and must keep prior completions.
+# =============================================================================
+
+# Seed a status.json with one completed task, one pending task, and the
+# implement stage in progress — the state a real run is in when a session
+# limit lands mid-way.
+_seed_status_with_completion() {
+    jq -n '{
+        state: "running",
+        issue: "123",
+        current_stage: "implement",
+        stages: {
+            implement: {status: "in_progress", task_progress: "1/2"}
+        },
+        tasks: [
+            {id: 1, status: "completed", review_attempts: 1},
+            {id: 2, status: "in_progress", review_attempts: 0}
+        ],
+        escalations: []
+    }' > "$STATUS_FILE"
+}
+
+@test "set_paused_state writes state=paused with the reset time" {
+    _seed_status_with_completion
+
+    set_paused_state "2pm (Australia/Melbourne)"
+
+    assert_json_field "$STATUS_FILE" '.state' "paused"
+    assert_json_field "$STATUS_FILE" '.session_limit_reset' \
+        "2pm (Australia/Melbourne)"
+    assert_json_field "$STATUS_FILE" '.paused_reason' "session_limit"
+}
+
+@test "set_paused_state marks NO task as failed" {
+    _seed_status_with_completion
+
+    set_paused_state "9am"
+
+    local failed_count
+    failed_count=$(jq '[.tasks[] | select(.status == "failed")] | length' \
+        "$STATUS_FILE")
+    [ "$failed_count" -eq 0 ]
+}
+
+@test "set_paused_state preserves prior completed-task state" {
+    _seed_status_with_completion
+
+    set_paused_state "9am"
+
+    # Task 1 stays completed; task 2 stays whatever it was (not failed).
+    assert_json_field "$STATUS_FILE" \
+        '(.tasks[] | select(.id == 1)).status' "completed"
+    assert_json_field "$STATUS_FILE" \
+        '(.tasks[] | select(.id == 2)).status' "in_progress"
+
+    local completed_count
+    completed_count=$(jq '[.tasks[] | select(.status == "completed")] | length' \
+        "$STATUS_FILE")
+    [ "$completed_count" -eq 1 ]
+}
+
+@test "set_paused_state with no reset time records null, still paused" {
+    _seed_status_with_completion
+
+    set_paused_state ""
+
+    assert_json_field "$STATUS_FILE" '.state' "paused"
+    assert_json_field "$STATUS_FILE" '.session_limit_reset' "null"
+}
+
+@test "run_stage pause path persists paused state via set_paused_state" {
+    local func_def
+    func_def=$(declare -f run_stage)
+    [[ "$func_def" == *"set_paused_state"* ]] \
+        || fail "run_stage pause path does not call set_paused_state"
+}
+
+@test "run_task_in_worktree does not mark a session_limit task failed" {
+    local func_def
+    func_def=$(declare -f run_task_in_worktree)
+    # The session-limit branch must emit a paused result and short-circuit
+    # before the failed-result write at the end of the function.
+    [[ "$func_def" == *"session_limit"* ]] \
+        || fail "run_task_in_worktree lacks a session_limit branch"
+    [[ "$func_def" == *"paused"* ]] \
+        || fail "run_task_in_worktree does not write a paused result"
+    # The paused write must precede the terminal failed-result write, so a
+    # session_limit never falls through to being marked failed.
+    local paused_line failed_line
+    paused_line=$(printf '%s\n' "$func_def" \
+        | grep -n "status.*paused" | head -1 | cut -d: -f1)
+    failed_line=$(printf '%s\n' "$func_def" \
+        | grep -n "status.*failed" | tail -1 | cut -d: -f1)
+    [ -n "$paused_line" ] && [ -n "$failed_line" ] \
+        || fail "could not locate both paused and failed writes"
+    (( paused_line < failed_line )) \
+        || fail "paused write ($paused_line) not before failed write ($failed_line)"
+}
+
+@test "run_stage detects session limit before the generic rate-limit branch" {
+    local func_def
+    func_def=$(declare -f run_stage)
+
+    [[ "$func_def" == *"detect_session_limit"* ]] \
+        || fail "run_stage lacks detect_session_limit"
+
+    # The session-limit branch must be evaluated ahead of detect_rate_limit so
+    # a session-limit 429 never falls into the retriable rate-limit path.
+    local session_line rate_line
+    session_line=$(printf '%s\n' "$func_def" \
+        | grep -n "detect_session_limit" | head -1 | cut -d: -f1)
+    rate_line=$(printf '%s\n' "$func_def" \
+        | grep -n "detect_rate_limit" | head -1 | cut -d: -f1)
+    [ -n "$session_line" ] && [ -n "$rate_line" ] \
+        || fail "could not locate both detection branches"
+    (( session_line < rate_line )) \
+        || fail "detect_session_limit ($session_line) not before detect_rate_limit ($rate_line)"
+}
+
+# =============================================================================
 # EXTRACT_WAIT_TIME
 # =============================================================================
 
