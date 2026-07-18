@@ -1,7 +1,9 @@
 # Claude Pipeline → Plugin Marketplace: Migration Plan
 
-**Status:** Proposal · **Date:** 2026-06-13 · **Audience:** Steve (upstream), Russell (fork)
+**Status:** Proposal · **Date:** 2026-06-13 (rev. 2026-07-05) · **Audience:** Steve (upstream), Russell (fork)
 **Repo analysed:** `scullers68/claude-pipeline` (fork of `aaddrick/claude-pipeline`), local clone @ `a3c05f2`
+
+> **This is one of three companion docs — read together:** (1) this plan — *what to build*; (2) `docs/experiments/ab-pipeline-vs-epic-task-loop.md` — an empirical pipeline-vs-`/epic-task-loop` cost A/B showing *why the orchestrator is the weak point*; (3) `docs/experiments/pipeline-findings.md` — a cost/robustness audit with *the concrete fixes* (tickets #13–#18). The 2026-07-05 revision cross-links (2) and (3) into §3.4 and §6.
 
 ---
 
@@ -81,7 +83,15 @@ These 11 skills are forks of the superpowers ecosystem and duplicate what consum
 
 `brainstorming`, `systematic-debugging`, `test-driven-development`, `subagent-driven-development`, `dispatching-parallel-agents`, `executing-plans`, `using-git-worktrees`, `using-skills`, `writing-agents`, `writing-plans`, `writing-skills`
 
-README states: *"pipeline-core assumes the superpowers plugin is installed"* — and `pipeline-setup` checks for it. If the forks have meaningful divergence worth keeping, the alternative is a fifth plugin (`pipeline-methodology`) — but audit the diff first; carrying a fork of someone else's actively-maintained skill set is the same drift problem this migration is killing.
+README states: *"pipeline-core assumes the superpowers plugin is installed"* — and `pipeline-setup` checks for it.
+
+**Why split methodology out — the benefit, not just dedup.** Superpowers is actively maintained upstream on its own cadence. Depending on it instead of forking it means:
+
+- **Free upstream fixes.** New and improved superpowers skills land in every consumer via `git push` to superpowers — zero merge effort on our side. A fork means every superpowers release becomes a diff *we* must reconcile, forever.
+- **No fork-maintenance tax.** The engine (core) and the methodology (brainstorming, TDD, debugging…) have *different maintainers and cadences*. Keeping them in one tree is precisely what forces the drift this whole migration exists to kill — applied to someone else's code, where we have the least leverage.
+- **The both-loaded waste ends.** Today a consumer already running superpowers loads **two** copies of `brainstorming`, `test-driven-development`, etc. — extra metadata tokens for a skill that is, at best, identical and, at worst, a stale fork silently shadowing the maintained one.
+
+**Open question — Phase 2 gate (not yet decided).** Whether these forks carry divergence worth keeping needs a diff audit against current superpowers. If real divergence exists it becomes a documented patch or a fifth `pipeline-methodology` plugin; if not — the likely case — they are simply deleted. Either way, the default is *depend, don't fork*.
 
 Also retired: `pipeline-sync` and `adapting-claude-pipeline` (the plugin system replaces both), `apply-local.sh`, `sync.sh`.
 
@@ -251,8 +261,14 @@ Enable in the remaining consumer projects; delete their copied `.claude/` pipeli
 **Phase 5 — CI** (½ day)
 GitHub Action: bats suites + shellcheck + a smoke test that installs the marketplace into a scratch project and asserts skills/hooks resolve.
 
-**Phase 6 (later, optional) — Orchestrator on the Agent SDK**
-`implement-issue-orchestrator.sh` is 6,047 lines of bash implementing a state machine (JSON parsing, retries, rate limits, timeout escalation, review loops). It works and is tested — ship it as-is in v2.0. But its replacement is a TypeScript Agent SDK program (or Claude Code workflow script): real data structures, native subagent management, and the retry/rate-limit machinery for free. The issue-format conventions and test fixtures all carry over. Do this only when the next substantial orchestrator feature is needed — not as part of this migration.
+**Phase 6 (later, but now evidence-backed) — Orchestrator on the Agent SDK**
+`implement-issue-orchestrator.sh` is **~8,000 lines** of bash implementing a state machine — JSON parsing, retries, rate limits, timeout escalation, review loops. (It was 6,047 lines when this plan was first drafted; it has grown ~2k lines in three weeks — the monolith is *accreting*, not stabilising.) It is shippable as-is in v2.0 — it works and is tested — **but treat it as a named robustness risk, not a future nicety.** The cost/robustness audit (`docs/experiments/pipeline-findings.md`, Findings 9–10) found that:
+
+- **Both current critical bugs live inside this one file** — #13 (session-limit 429 misclassification) and #14 (max-turns cold-retry churn). A monolith with no stage-isolation or test seams is where bugs hide and compound.
+- **Its supervision code is the least-tested in the suite** — the watchdog/timeout tests in `test-stage-runner.bats` exceed 5 hours and are exiled to a nightly job, so the safety-critical paths are exercised least.
+- **The cost is measured, not hypothetical** — the A/B (`docs/experiments/ab-pipeline-vs-epic-task-loop.md`) shows this orchestrator spending **~3.4× the tokens** of a warm single-context loop on issue #13 and shipping *less*, ~55% of it fixable churn from #14.
+
+The replacement is the TypeScript Agent SDK harness **already scaffolded** under `plugins/pipeline-core/sdk/` (issue #11, wired side-by-side via `ORCHESTRATOR_ENGINE=bash|sdk`): real data structures, native subagent management, retry/rate-limit machinery for free. Issue-format conventions and test fixtures carry over. **Recommendation:** ship v2.0 on the bash engine, but (a) land the #13/#14 fixes first — they roughly halve the as-is cost — and (b) prioritise completing the SDK harness as the *durable* fix rather than deferring it to "when the next feature is needed." The file is growing and it is where the bugs live; waiting makes the eventual port harder, not easier.
 
 ## 8. Risks & mitigations
 
@@ -271,8 +287,9 @@ GitHub Action: bats suites + shellcheck + a smoke test that installs the marketp
 - **Distribution**: `cp -r` + 6-step adaptation + overlay scripts → one `/plugin install`. Updates propagate by `git push`.
 - **Reliability**: kills the partial-copy failure class outright (nine differently-broken hook copies found in Russell's projects this week).
 - **Footprint**: consumers stop carrying ~17.7k lines of skills they must prune; backend repos no longer ship pricing-page design guidance.
-- **Separation**: engine (core) / methodology (superpowers dependency) / stack opinions (packs) each evolve independently; third parties can add stack packs without touching core.
+- **Separation**: engine (core) / methodology (**a dependency on upstream superpowers, not a fork**) / stack opinions (packs) each evolve independently — you inherit superpowers' fixes for free, third parties add stack packs without touching core, and the both-loaded skill duplication ends (§3.4).
 - **The good parts are untouched**: the issue-as-source-of-truth convention, the platform abstraction, the parseable task-list format, and the bats discipline all survive verbatim — they're the product; the copying was just the packaging.
+- **Now evidence-backed**: a pipeline-vs-`/epic-task-loop` A/B (`docs/experiments/`) shows the orchestrator costs ~3.4× the tokens for this class of work (~55% fixable churn) — the 8k-line bash monolith is the measured weak point, and the SDK harness (#11) is its durable fix. The companion findings doc turns this into ticketed work (#13–#18).
 
 ---
 *Total estimated effort: ~3.5 days with Claude Code doing the mechanical work, phased so the pipeline stays usable throughout.*
