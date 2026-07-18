@@ -9,7 +9,7 @@
 
 ## 1. The problem in one paragraph
 
-The pipeline is distributed by **copying the whole `.claude/` tree into every consuming project**, then pruning it with the 6-step `adapting-claude-pipeline` process, then keeping copies alive with a hand-rolled overlay system (`.claude/local/` + `apply-local.sh` + `sync.sh`). Every copy drifts immediately and propagates partially. Real-world evidence: nine of Russell's projects carried the `post-pr-simplify` hook wiring, but the `code-simplifier` agent it depends on existed in only one of them, and one project (precis) had the wiring without the script at all — every MR in eight projects errored with "agent not found". That failure mode is structural to copy-based distribution. Claude Code **plugins** solve exactly this: versioned central repo, one-line enablement per project, no adaptation step, no drift.
+The pipeline is distributed by **copying the whole `.claude/` tree into every consuming project**, then pruning it with the 6-step `adapting-claude-pipeline` process, then keeping copies alive with a hand-rolled overlay system (`.claude/local/` + `apply-local.sh` + `sync.sh`). Every copy drifts immediately and propagates partially. Real-world evidence: nine of my projects carried the `post-pr-simplify` hook wiring, but the `code-simplifier` agent it depends on existed in only one of them, and one project (precis) had the wiring without the script at all — every MR in eight projects errored with "agent not found". That failure mode is structural to copy-based distribution. Claude Code **plugins** solve exactly this: versioned central repo, one-line enablement per project, no adaptation step, no drift.
 
 ## 2. Target architecture
 
@@ -75,11 +75,11 @@ Updating every project = pushing to the marketplace repo. No `sync.sh`, no `appl
 |---|---|
 | Agents (1) | `fastify-backend-developer` |
 
-Thin today, but the right home for future fastify skills/prompts. Stack packs are the extension point: a `pipeline-totara` pack (Russell's TKE world) or `pipeline-laravel` pack slots in without touching core.
+Thin today, but the right home for future fastify skills/prompts. Stack packs are the extension point: a `pipeline-totara` pack (the Totara/TKE world) or `pipeline-laravel` pack slots in without touching core.
 
 ### 3.4 Deleted — replaced by a declared dependency on **superpowers**
 
-These 11 skills are forks of the superpowers ecosystem and duplicate what consumers can install directly (Russell already runs the superpowers plugin — the duplication is live today, with both copies loaded):
+These 11 skills are forks of the superpowers ecosystem and duplicate what consumers can install directly (I already run the superpowers plugin — the duplication is live today, with both copies loaded):
 
 `brainstorming`, `systematic-debugging`, `test-driven-development`, `subagent-driven-development`, `dispatching-parallel-agents`, `executing-plans`, `using-git-worktrees`, `using-skills`, `writing-agents`, `writing-plans`, `writing-skills`
 
@@ -285,7 +285,7 @@ The replacement is the TypeScript Agent SDK harness **already scaffolded** under
 ## 9. Why this is worth it
 
 - **Distribution**: `cp -r` + 6-step adaptation + overlay scripts → one `/plugin install`. Updates propagate by `git push`.
-- **Reliability**: kills the partial-copy failure class outright (nine differently-broken hook copies found in Russell's projects this week).
+- **Reliability**: kills the partial-copy failure class outright (nine differently-broken hook copies found across my projects this week).
 - **Footprint**: consumers stop carrying ~17.7k lines of skills they must prune; backend repos no longer ship pricing-page design guidance.
 - **Separation**: engine (core) / methodology (**a dependency on upstream superpowers, not a fork**) / stack opinions (packs) each evolve independently — you inherit superpowers' fixes for free, third parties add stack packs without touching core, and the both-loaded skill duplication ends (§3.4).
 - **The good parts are untouched**: the issue-as-source-of-truth convention, the platform abstraction, the parseable task-list format, and the bats discipline all survive verbatim — they're the product; the copying was just the packaging.
