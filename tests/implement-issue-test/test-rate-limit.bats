@@ -469,3 +469,82 @@ _seed_status_with_completion() {
     log_output=$(handle_rate_limit "$rate_limit_output" 2>&1)
     [[ "$log_output" == *"Rate limit hit"* ]] || fail "Expected rate limit log message"
 }
+
+# =============================================================================
+# CHECK_RUN_BUDGET — per-run cost/turns circuit-breaker (issue #16)
+# When cumulative cost/turns (parsed from the stage logs) cross a configurable
+# ceiling, the run must halt resumably: state=paused (reason=budget_exceeded),
+# completions preserved, NO task failed. Ceilings are env-configurable; 0
+# disables a dimension. Defaults (enabled): MAX_RUN_COST_USD=50, MAX_RUN_TURNS=1000.
+# =============================================================================
+
+# Write one stage-log result envelope with the given cost + turns.
+_write_usage_log() {
+    local cost="$1" turns="$2"
+    mkdir -p "$LOG_BASE/stages"
+    printf '%s\n' \
+        "{\"type\":\"result\",\"subtype\":\"success\",\"num_turns\":$turns,\"total_cost_usd\":$cost,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":1,\"cache_read_input_tokens\":1,\"output_tokens\":1}}" \
+        > "$LOG_BASE/stages/01-implement-task-1.log"
+}
+
+@test "(B1) check_run_budget halts resumably when cost ceiling exceeded (#16)" {
+    _seed_status_with_completion
+    export MAX_RUN_COST_USD=50 MAX_RUN_TURNS=1000
+    _write_usage_log 60 10
+
+    run check_run_budget "1"
+    [ "$status" -eq 1 ] || fail "expected breach (rc=1), got rc=$status"
+    assert_json_field "$STATUS_FILE" '.state' "paused"
+    assert_json_field "$STATUS_FILE" '.paused_reason' "budget_exceeded"
+    # completions preserved, no task failed
+    [ "$(jq '[.tasks[] | select(.status == "failed")] | length' "$STATUS_FILE")" -eq 0 ]
+    assert_json_field "$STATUS_FILE" '.tasks[0].status' "completed"
+}
+
+@test "(B2) check_run_budget halts when turns ceiling exceeded (#16)" {
+    _seed_status_with_completion
+    export MAX_RUN_COST_USD=0 MAX_RUN_TURNS=1000
+    _write_usage_log 1 1500
+
+    run check_run_budget "1"
+    [ "$status" -eq 1 ] || fail "expected breach (rc=1), got rc=$status"
+    assert_json_field "$STATUS_FILE" '.state' "paused"
+    assert_json_field "$STATUS_FILE" '.paused_reason' "budget_exceeded"
+}
+
+@test "(B3) check_run_budget does NOT trip a run under both ceilings (#16)" {
+    _seed_status_with_completion
+    export MAX_RUN_COST_USD=50 MAX_RUN_TURNS=1000
+    _write_usage_log 5 100
+
+    run check_run_budget "1"
+    [ "$status" -eq 0 ] || fail "expected no breach (rc=0), got rc=$status"
+    # state untouched — still running, not paused
+    assert_json_field "$STATUS_FILE" '.state' "running"
+}
+
+@test "(B4) check_run_budget is opt-out: 0/0 never trips even when over (#16)" {
+    _seed_status_with_completion
+    export MAX_RUN_COST_USD=0 MAX_RUN_TURNS=0
+    _write_usage_log 999 99999
+
+    run check_run_budget "1"
+    [ "$status" -eq 0 ] || fail "disabled breaker must not trip, got rc=$status"
+    assert_json_field "$STATUS_FILE" '.state' "running"
+}
+
+@test "(B5) check_run_budget default ceilings are enabled (50/1000) (#16)" {
+    _seed_status_with_completion
+    unset MAX_RUN_COST_USD MAX_RUN_TURNS
+    _write_usage_log 60 10   # over the default $50
+
+    run check_run_budget "1"
+    [ "$status" -eq 1 ] || fail "default cost ceiling should trip at \$60, got rc=$status"
+    assert_json_field "$STATUS_FILE" '.paused_reason' "budget_exceeded"
+}
+
+@test "(B6) set_paused_state default reason stays session_limit (regression, #16 param)" {
+    _seed_status_with_completion
+    set_paused_state "2pm"
+    assert_json_field "$STATUS_FILE" '.paused_reason' "session_limit"
+}

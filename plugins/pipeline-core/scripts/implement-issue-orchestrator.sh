@@ -110,6 +110,15 @@ MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
 # actual env-overridden per-phase budget variables.
 # Override via MAX_ORCHESTRATOR_WALL_TIME env to set a different base.
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-11040}"
+
+# Per-run cost/turns budget circuit-breaker (issue #16). When the run's
+# cumulative spend (parsed from the stage logs) crosses either ceiling, the
+# run halts resumably (state=paused, reason=budget_exceeded) instead of burning
+# unbounded tokens on a runaway. Enabled by default with generous ceilings that
+# clear a normal single-issue run (~$5-20 / ~100-400 turns); set either to 0 to
+# disable that dimension. See check_run_budget().
+MAX_RUN_COST_USD="${MAX_RUN_COST_USD:-50}"
+MAX_RUN_TURNS="${MAX_RUN_TURNS:-1000}"
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
 # Slack added on top of the per-iteration timeout when computing the
 # PR-review loop wall-clock budget.  Override via env to tune.
@@ -254,6 +263,51 @@ check_wall_timeout() {
         log_warn "Global wall-clock timeout: ${elapsed}s elapsed (limit: ${MAX_ORCHESTRATOR_WALL_TIME}s). Soft-exiting current loop."
         return 1
     fi
+    return 0
+}
+
+# check_run_budget <batch_num> — per-run cost/turns circuit-breaker (issue #16).
+# Computes the run's cumulative cost/turns from the stage logs (reusing
+# _collect_stage_usage, issue #15) and, if either ceiling is exceeded, halts the
+# run resumably via set_paused_state (reason=budget_exceeded): completions are
+# preserved and NO task is marked failed. Ceilings are env-configurable; a value
+# of 0 (or empty) disables that dimension. Returns 1 on breach (caller breaks
+# the loop; the post-loop paused-state check then exits resumably), 0 otherwise.
+check_run_budget() {
+    local batch_num="${1:-?}"
+    local cost_limit="${MAX_RUN_COST_USD:-50}"
+    local turns_limit="${MAX_RUN_TURNS:-1000}"
+
+    # Both dimensions disabled → nothing to check (opt-out).
+    if [[ ( "$cost_limit" == "0" || -z "$cost_limit" ) \
+        && ( "$turns_limit" == "0" || -z "$turns_limit" ) ]]; then
+        return 0
+    fi
+
+    local usage cost turns
+    usage=$(_collect_stage_usage "$LOG_BASE/stages")
+    cost=$(printf '%s' "$usage" | jq -r '.run_total.total_cost_usd // 0')
+    turns=$(printf '%s' "$usage" | jq -r '.run_total.num_turns // 0')
+
+    # Cost is a float → compare with awk. Turns is an integer.
+    if [[ "$cost_limit" != "0" && -n "$cost_limit" ]] \
+        && awk -v c="$cost" -v l="$cost_limit" 'BEGIN { exit !((c + 0) >= (l + 0)) }'; then
+        log_warn "Run budget exceeded after batch $batch_num:" \
+            "cost \$$cost >= limit \$$cost_limit (env MAX_RUN_COST_USD)." \
+            "Halting resumably — no task failed; --resume to continue."
+        set_paused_state "" "budget_exceeded"
+        return 1
+    fi
+
+    if [[ "$turns_limit" != "0" && -n "$turns_limit" ]] \
+        && (( turns >= turns_limit )); then
+        log_warn "Run budget exceeded after batch $batch_num:" \
+            "turns $turns >= limit $turns_limit (env MAX_RUN_TURNS)." \
+            "Halting resumably — no task failed; --resume to continue."
+        set_paused_state "" "budget_exceeded"
+        return 1
+    fi
+
     return 0
 }
 
@@ -816,15 +870,16 @@ set_final_state() {
 # .session_limit_reset to know when the limit clears and continues from here.
 set_paused_state() {
     local reset_time="${1:-}"
+    local reason="${2:-session_limit}"
     local prev_state stage
     prev_state=$(jq -r '.state // "running"' "$STATUS_FILE" 2>/dev/null) \
         || prev_state="running"
     stage=$(jq -r '.current_stage // "unknown"' "$STATUS_FILE" 2>/dev/null) \
         || stage="unknown"
 
-    jq --arg reset "$reset_time" \
+    jq --arg reset "$reset_time" --arg reason "$reason" \
        '.state = "paused" |
-        .paused_reason = "session_limit" |
+        .paused_reason = $reason |
         .session_limit_reset = (if $reset == "" then null else $reset end) |
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
@@ -7630,6 +7685,15 @@ $impl_summary" "$tagent"
             local _impl_git_exit=$?
             if (( _impl_git_exit == 124 )); then
                 log_warn "implement: git checkout $branch timed out after ${IMPLEMENT_GIT_TIMEOUT}s"
+            fi
+
+            # Budget circuit-breaker (issue #16): halt resumably if cumulative
+            # cost/turns exceed the configured ceiling. On breach check_run_budget
+            # sets state=paused (reason=budget_exceeded) via the same machinery as
+            # the session-limit halt, so completions are preserved and no task is
+            # marked failed; break here and the post-loop paused check exits resumably.
+            if ! check_run_budget "$batch_num"; then
+                break
             fi
 
             # Session-limit halt: if a batch paused the run (state=paused,
