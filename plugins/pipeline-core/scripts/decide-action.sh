@@ -101,6 +101,23 @@ _bash_decide() {
 		return 0
 	fi
 
+	# max_turns exhaustion (below ceiling) → give the SAME model more turns via a
+	# same-model retry, not a cold escalation to a pricier tier. "Needs more
+	# turns" is not "failed" (issue #14). Bounded like rate_limit: retry same
+	# once, then fall through to escalate so a genuinely oversized task still
+	# progresses.
+	if [[ "$error_kind" == "max_turns_exhausted" ]]; then
+		local mt_prior
+		mt_prior=$(printf '%s' "$history" | \
+			jq --arg m "$model" \
+			   '[.[] | select(.from_model == $m)] | length')
+		if (( mt_prior == 0 )); then
+			printf '%s\n' \
+				'{"action":"retry_same","reason":"max_turns_exhausted: needs more turns, retrying same model (not a failure)"}'
+			return 0
+		fi
+	fi
+
 	# quality_stall → escalate, or bail if already at opus ceiling
 	if [[ "$error_kind" == "quality_stall" ]]; then
 		if [[ "$model" == "opus" ]]; then
@@ -214,6 +231,22 @@ _compose_decide() {
 		printf '%s\n' \
 			'{"action":"pause","reason":"session_limit: unretriable 429, pausing without consuming retry budget"}'
 		return 0
+	fi
+
+	# max_turns exhaustion (below ceiling) → same-model retry, not escalate.
+	# Short-circuit before delegating to decide-retry.sh so behaviour is
+	# identical across backends (issue #14). Bounded like rate_limit: retry same
+	# once, then fall through to the retry-policy delegation below.
+	if [[ "$error_kind" == "max_turns_exhausted" ]]; then
+		local mt_prior
+		mt_prior=$(printf '%s' "$history" | \
+			jq --arg m "$model" \
+			   '[.[] | select(.from_model == $m)] | length')
+		if (( mt_prior == 0 )); then
+			printf '%s\n' \
+				'{"action":"retry_same","reason":"max_turns_exhausted: needs more turns, retrying same model (not a failure)"}'
+			return 0
+		fi
 	fi
 
 	# Derive retry_count from escalation history — count prior same-model

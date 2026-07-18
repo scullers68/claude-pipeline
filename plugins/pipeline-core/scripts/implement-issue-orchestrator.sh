@@ -1857,12 +1857,19 @@ run_stage() {
         turns_args=(--max-turns 15)
         log "  Max turns: 15 (haiku via complexity override)"
     elif [[ "$model" == "sonnet" ]]; then
+        # Default sonnet turn caps for implement/review stages (issue #14). The
+        # old defaults (25 for S, 40 for M/L) were miscalibrated: a real (S)
+        # 2-file task needed 59 turns, so cap=25 guaranteed max_turns exhaustion
+        # → escalate → cold-restart churn (~55% of task tokens wasted). Raise the
+        # defaults above observed need and make them env-configurable.
         if [[ "$complexity" == "M" || "$complexity" == "L" ]]; then
-            turns_args=(--max-turns 40)
-            log "  Max turns: 40 (sonnet with M/L complexity)"
+            local _max_impl_ml="${MAX_TURNS_IMPLEMENT_ML:-80}"
+            turns_args=(--max-turns "$_max_impl_ml")
+            log "  Max turns: $_max_impl_ml (sonnet M/L complexity, env: MAX_TURNS_IMPLEMENT_ML)"
         else
-            turns_args=(--max-turns 25)
-            log "  Max turns: 25 (sonnet with S/empty complexity)"
+            local _max_impl="${MAX_TURNS_IMPLEMENT:-60}"
+            turns_args=(--max-turns "$_max_impl")
+            log "  Max turns: $_max_impl (sonnet S/empty complexity, env: MAX_TURNS_IMPLEMENT)"
         fi
     fi
 
