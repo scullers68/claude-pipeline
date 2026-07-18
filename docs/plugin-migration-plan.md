@@ -1,6 +1,6 @@
 # Claude Pipeline → Plugin Marketplace: Migration Plan
 
-**Status:** Proposal · **Date:** 2026-06-13 (rev. 2026-07-05) · **Audience:** Steve (upstream), Russell (fork)
+**Status:** Proposal · **Date:** 2026-06-13 (rev. 2026-07-05)
 **Repo analysed:** `scullers68/claude-pipeline` (fork of `aaddrick/claude-pipeline`), local clone @ `a3c05f2`
 
 > **This is one of three companion docs — read together:** (1) this plan — *what to build*; (2) `docs/experiments/ab-pipeline-vs-epic-task-loop.md` — an empirical pipeline-vs-`/epic-task-loop` cost A/B showing *why the orchestrator is the weak point*; (3) `docs/experiments/pipeline-findings.md` — a cost/robustness audit with *the concrete fixes* (tickets #13–#18). The 2026-07-05 revision cross-links (2) and (3) into §3.4 and §6.
@@ -31,7 +31,7 @@ claude-pipeline/                        (marketplace repo)
 **Consumer experience after migration:**
 
 ```bash
-/plugin marketplace add stevegrocott/claude-pipeline
+/plugin marketplace add scullers68/claude-pipeline
 /plugin install pipeline-core@claude-pipeline
 # optionally: pipeline-frontend, pipeline-fastify
 ```
@@ -41,7 +41,7 @@ or declaratively in a project's `.claude/settings.json`:
 ```json
 {
   "extraKnownMarketplaces": {
-    "claude-pipeline": { "source": { "source": "github", "repo": "stevegrocott/claude-pipeline" } }
+    "claude-pipeline": { "source": { "source": "github", "repo": "scullers68/claude-pipeline" } }
   },
   "enabledPlugins": { "pipeline-core@claude-pipeline": true }
 }
@@ -149,7 +149,7 @@ Net: `adapting-claude-pipeline` becomes `pipeline-setup` — same interviewing i
 ```json
 {
   "name": "claude-pipeline",
-  "owner": { "name": "Steve Grocott", "url": "https://github.com/stevegrocott" },
+  "owner": { "name": "Russell Grocott", "url": "https://github.com/scullers68" },
   "metadata": {
     "description": "Issue-driven development pipeline: /explore an idea into a planned issue, /implement-issue to ship it",
     "version": "2.0.0"
@@ -184,8 +184,8 @@ Net: `adapting-claude-pipeline` becomes `pipeline-setup` — same interviewing i
   "name": "pipeline-core",
   "version": "2.0.0",
   "description": "Issue-driven pipeline: /explore writes the plan into an issue with a parseable task list; /implement-issue reads it back, implements task-by-task with subagents, tests, reviews, and opens the PR/MR.",
-  "author": { "name": "Steve Grocott" },
-  "homepage": "https://github.com/stevegrocott/claude-pipeline",
+  "author": { "name": "Russell Grocott" },
+  "homepage": "https://github.com/scullers68/claude-pipeline",
   "keywords": ["workflow", "issues", "jira", "gitlab", "github", "orchestration"]
 }
 ```
@@ -244,7 +244,7 @@ plugins/pipeline-core/
 ## 7. Migration phases
 
 **Phase 0 — Fork & baseline** (½ day)
-Fork to `russellgrocott/claude-pipeline` (or branch on Steve's). Tag current state `v1-final`. Get bats suites green as the regression baseline.
+Fork/baseline on `scullers68/claude-pipeline`. Tag current state `v1-final`. Get bats suites green as the regression baseline.
 
 **Phase 1 — Mechanical restructure** (1 day)
 Create marketplace/plugin scaffolding; `git mv` assets per §3; convert inline hooks to scripts (§3.5); replace `$CLAUDE_PROJECT_DIR/.claude/scripts/...` self-references in orchestrators and skills with `${CLAUDE_PLUGIN_ROOT}/...` (grep says this is the bulk of the work — the orchestrator and several SKILL.md files hardcode the old paths). Move bats suites to `tests/`, pointed at the new script locations.
@@ -282,7 +282,7 @@ The replacement is the TypeScript Agent SDK harness **already scaffolded** under
 | Headless/CI use (`claude -p` from orchestrator) | Plugins load in headless mode; verify explicitly in Phase 3 pilot |
 | Upstream (`aaddrick`) sync story | The marketplace repo still tracks upstream via git; syncs now land in ONE place instead of N projects |
 
-## 9. Why this is worth it (summary for Steve)
+## 9. Why this is worth it
 
 - **Distribution**: `cp -r` + 6-step adaptation + overlay scripts → one `/plugin install`. Updates propagate by `git push`.
 - **Reliability**: kills the partial-copy failure class outright (nine differently-broken hook copies found in Russell's projects this week).
