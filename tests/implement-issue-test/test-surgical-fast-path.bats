@@ -197,6 +197,15 @@ case "${1:-}" in
                 rm -f "$TEST_TMP/git-stash-pushed"
                 exit 0
                 ;;
+            list)
+                # safe_stash_pop (issue #17) locates our stash by SHA via
+                # `git stash list --format=...`. Report the pushed stash as
+                # stash@{0} with the same fake SHA the rev-parse mock returns.
+                if [[ -f "$TEST_TMP/git-stash-pushed" ]]; then
+                    echo "stash@{0} abc123"
+                fi
+                exit 0
+                ;;
             *)
                 exit 0
                 ;;
