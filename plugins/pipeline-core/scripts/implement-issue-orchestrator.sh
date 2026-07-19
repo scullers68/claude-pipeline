@@ -1880,6 +1880,25 @@ _apply_stage_action() {
 # STAGE RUNNERS
 # =============================================================================
 
+# _retry_turns_args <error_kind> [<turns_args...>]
+# Compute the --max-turns args for a same-model retry (issue #28). On a
+# max_turns retry the same model needs MORE budget than the attempt that just
+# exhausted — retrying at the same cap merely re-exhausts and forces a cold
+# escalation. Raise the cap 1.5x for that case so the retry can actually finish;
+# otherwise pass the args through unchanged. Emits one arg per line (read with a
+# while-loop, not mapfile, for bash 3.2 portability).
+_retry_turns_args() {
+    local error_kind="$1"; shift
+    local -a args=("$@")
+    if [[ "$error_kind" == "max_turns_exhausted" \
+        && ${#args[@]} -eq 2 && "${args[0]}" == "--max-turns" \
+        && "${args[1]}" =~ ^[0-9]+$ ]]; then
+        printf '%s\n%s\n' "--max-turns" "$(( args[1] * 3 / 2 ))"
+    elif (( ${#args[@]} )); then
+        printf '%s\n' "${args[@]}"
+    fi
+}
+
 run_stage() {
     local stage_name="$1"
     local prompt="$2"
@@ -2582,7 +2601,7 @@ for m in re.finditer(r'\[\s*\{', t):
             # classification above; emit the retry/model_call events now.
             emit_event "retry" \
                 "stage=$stage_name" \
-                "reason=rate_limit" \
+                "reason=${_error_kind:-rate_limit}" \
                 "attempt:=2" \
                 "max_attempts:=2" \
                 "model=$model"
@@ -2595,6 +2614,19 @@ for m in re.finditer(r'\[\s*\{', t):
                 "complexity=${complexity:-}" \
                 "stage_attempt:=2"
 
+            # On a max_turns retry, give the same model a LARGER turn budget
+            # (issue #28) so it can finish instead of re-exhausting at the same
+            # cap and forcing a cold escalation. For rate_limit retries the
+            # budget is unchanged.
+            local -a _retry_turns=()
+            local _rt_line
+            while IFS= read -r _rt_line; do
+                _retry_turns+=("$_rt_line")
+            done < <(_retry_turns_args "$_error_kind" ${turns_args[@]+"${turns_args[@]}"})
+            if [[ "$_error_kind" == "max_turns_exhausted" ]]; then
+                log "  Retry budget: ${turns_args[*]:-uncapped} → ${_retry_turns[*]:-uncapped} (max_turns retry, #28)"
+            fi
+
             local _retry_exit_code=0
             # Temp-file capture (see run_stage's primary launch) — avoids the
             # command-substitution pipe-wedge when the CLI leaves a lingering child.
@@ -2604,7 +2636,7 @@ for m in re.finditer(r'\[\s*\{', t):
                 ${agent_args[@]+"${agent_args[@]}"} \
                 --model "$model" \
                 ${fallback_args[@]+"${fallback_args[@]}"} \
-                ${turns_args[@]+"${turns_args[@]}"} \
+                ${_retry_turns[@]+"${_retry_turns[@]}"} \
                 --dangerously-skip-permissions \
                 --output-format json \
                 --json-schema "$schema" \
