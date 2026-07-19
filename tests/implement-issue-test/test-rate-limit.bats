@@ -548,3 +548,43 @@ _write_usage_log() {
     set_paused_state "2pm"
     assert_json_field "$STATUS_FILE" '.paused_reason' "session_limit"
 }
+
+# =============================================================================
+# _retry_turns_args — raise the turn budget on a max_turns retry (issue #28)
+# AC1's retry_same engages, but retrying at the SAME cap just re-exhausts and
+# escalates. On a max_turns retry the same model must get MORE turns (1.5x) so
+# it can finish; a rate_limit retry keeps its budget.
+# =============================================================================
+
+@test "(RT1) _retry_turns_args raises the cap 1.5x on a max_turns retry (#28)" {
+    run _retry_turns_args max_turns_exhausted --max-turns 60
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "--max-turns" ] || fail "flag: ${lines[0]}"
+    [ "${lines[1]}" = "90" ] || fail "expected 90 (60*1.5), got ${lines[1]}"
+}
+
+@test "(RT2) _retry_turns_args leaves the cap unchanged on a rate_limit retry (#28)" {
+    run _retry_turns_args rate_limit --max-turns 60
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "--max-turns" ]
+    [ "${lines[1]}" = "60" ] || fail "rate_limit budget must be unchanged, got ${lines[1]}"
+}
+
+@test "(RT3) _retry_turns_args rounds down (25 -> 37) and handles an uncapped stage (#28)" {
+    run _retry_turns_args max_turns_exhausted --max-turns 25
+    [ "${lines[1]}" = "37" ] || fail "expected 37 (25*1.5 floored), got ${lines[1]}"
+
+    run _retry_turns_args max_turns_exhausted
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || fail "uncapped stage must yield no --max-turns, got: $output"
+}
+
+@test "(RT4) run_stage's retry path uses _retry_turns_args, not the raw turns_args (#28)" {
+    # Structural guard: the retry claude call must pass the raised budget.
+    local src="$ORCHESTRATOR_SCRIPT"
+    grep -q '_retry_turns_args "\$_error_kind"' "$src" \
+        || fail "retry path does not call _retry_turns_args"
+    # The retry claude invocation passes _retry_turns (not turns_args).
+    grep -q '\${_retry_turns\[@\]' "$src" \
+        || fail "retry claude call does not use _retry_turns"
+}
