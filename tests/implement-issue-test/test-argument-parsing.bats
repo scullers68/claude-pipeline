@@ -175,3 +175,85 @@ teardown() {
     [ "$status" -ne 0 ]
     [[ "$output" != *"Unknown option: --quiet"* ]]
 }
+
+# =============================================================================
+# DRY-RUN / NO-COMMENT / STOP-AFTER (issue #18)
+# --no-comment (alias of --quiet), --dry-run (quiet + skip PR/push/merge), and
+# --stop-after <stage> (exit cleanly once <stage> completes). Side-effect-free
+# and partial runs for measurement/testing.
+# =============================================================================
+
+@test "--no-comment is accepted (not an unknown option) (#18)" {
+    run bash "$ORCHESTRATOR_SCRIPT" --no-comment 2>&1
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"Unknown option: --no-comment"* ]]
+}
+
+@test "--dry-run is accepted (not an unknown option) (#18)" {
+    run bash "$ORCHESTRATOR_SCRIPT" --dry-run 2>&1
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"Unknown option: --dry-run"* ]]
+}
+
+@test "--stop-after is accepted (not an unknown option) (#18)" {
+    run bash "$ORCHESTRATOR_SCRIPT" --stop-after implement 2>&1
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"Unknown option: --stop-after"* ]]
+}
+
+@test "--stop-after requires a stage value (#18)" {
+    run bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --stop-after 2>&1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--stop-after requires"* ]]
+}
+
+# Behavioral: the stop-after mechanism lives in set_stage_completed — once the
+# requested stage completes, the run exits 0 (EXIT trap still writes metrics).
+_seed_running_status() {
+    export STATUS_FILE="$TEST_TMP/status.json"
+    export LOG_BASE="$TEST_TMP/logs/test"
+    export LOG_FILE="$LOG_BASE/orchestrator.log"
+    mkdir -p "$LOG_BASE/stages"
+    echo '{"stages":{},"state":"running"}' > "$STATUS_FILE"
+}
+
+@test "set_stage_completed exits 0 and marks state=stopped after the --stop-after stage (#18)" {
+    source_orchestrator_functions
+    _seed_running_status
+    export STOP_AFTER=implement
+    run set_stage_completed implement
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Stopping after stage 'implement'"* ]] || {
+        printf 'FAIL: no stop log. Output: %s\n' "$output" >&2; return 1; }
+    [ "$(jq -r '.state' "$STATUS_FILE")" = "stopped" ]
+}
+
+@test "set_stage_completed does NOT stop for a non-matching stage (#18)" {
+    source_orchestrator_functions
+    _seed_running_status
+    export STOP_AFTER=implement
+    run set_stage_completed triage
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Stopping after"* ]]
+    [ "$(jq -r '.state' "$STATUS_FILE")" = "running" ]
+}
+
+@test "set_stage_completed does NOT stop when --stop-after unset (default behaviour) (#18)" {
+    source_orchestrator_functions
+    _seed_running_status
+    unset STOP_AFTER
+    run set_stage_completed implement
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Stopping after"* ]]
+    [ "$(jq -r '.state' "$STATUS_FILE")" = "running" ]
+}
+
+@test "comment_issue is a no-op when QUIET (dry-run implies --no-comment) (#18)" {
+    source_orchestrator_functions
+    _seed_running_status
+    export QUIET=true
+    run comment_issue "Test Title" "Test Body"
+    [ "$status" -eq 0 ]
+    # Short-circuits before formatting — the title never reaches output.
+    [[ "$output" != *"Test Title"* ]]
+}
