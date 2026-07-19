@@ -444,6 +444,9 @@ STATUS_FILE="status.json"
 RESUME_MODE=""
 RESUME_LOG_DIR=""
 QUIET=false
+# issue #18: side-effect-free / partial runs.
+DRY_RUN=false        # --dry-run: no comments, push, PR, or merge (skips PR stage)
+STOP_AFTER=""        # --stop-after <stage>: exit cleanly once <stage> completes
 
 usage() {
     cat <<EOF
@@ -457,6 +460,11 @@ Options:
   --agent <name>         Default agent for setup stage (optional)
   --status-file <path>   Custom status file path (optional)
   --quiet                Suppress all issue comments (no tracker noise)
+  --no-comment           Alias of --quiet
+  --dry-run              No side effects: no comments, push, PR, or merge
+                         (implies --no-comment; skips the PR stage)
+  --stop-after <stage>   Run up to and including <stage> then exit cleanly
+                         (e.g. --stop-after implement)
   --resume               Resume from existing status.json
   --resume-from <dir>    Resume from specific log directory
 
@@ -495,6 +503,24 @@ while [[ $# -gt 0 ]]; do
         --quiet)
             QUIET=true
             shift
+            ;;
+        --no-comment)
+            # issue #18: alias of --quiet — suppress all issue comments.
+            QUIET=true
+            shift
+            ;;
+        --dry-run)
+            # issue #18: no outward-facing side effects — implies --no-comment
+            # and skips the PR stage (push / MR / merge).
+            QUIET=true
+            DRY_RUN=true
+            shift
+            ;;
+        --stop-after)
+            # issue #18: exit cleanly once the named stage completes.
+            [[ -n "${2:-}" ]] || { echo "ERROR: --stop-after requires a stage name" >&2; exit 3; }
+            STOP_AFTER="$2"
+            shift 2
             ;;
         --resume)
             RESUME_MODE="status"
@@ -771,6 +797,17 @@ set_stage_completed() {
     # Schema enum for stage_end.status is ["success","error","rate_limit"];
     # "completed" is the status.json column name, not the event-stream value.
     emit_event "stage_end" "stage=$stage" "status=success"
+
+    # --stop-after <stage> (issue #18): once the requested stage completes, stop
+    # the run cleanly so it can be bounded (e.g. --stop-after implement for a
+    # measurement run). Mark a deliberate "stopped" state so the EXIT trap does
+    # not rewrite it to "interrupted"; the trap still writes metrics.json.
+    if [[ -n "${STOP_AFTER:-}" && "$stage" == "${STOP_AFTER}" ]]; then
+        jq '.state = "stopped"' "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+            && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        log "Stopping after stage '$stage' (--stop-after); status.json/metrics.json written."
+        exit 0
+    fi
 }
 
 set_stage_failed() {
@@ -8049,6 +8086,17 @@ Only the files listed above should be staged and committed."
 
             set_stage_completed "docs"
         fi
+    fi
+
+    # Dry-run (issue #18): stop before the PR stage so there are no push, MR/PR,
+    # or merge side effects. The run has done its work (implement/test/docs) and
+    # the EXIT trap writes status.json + metrics.json. --dry-run also implies
+    # --no-comment (QUIET), so no issue comments were posted either.
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        jq '.state = "stopped"' "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+            && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        log "Dry-run: skipping PR creation, push, and merge (no outward-facing side effects)."
+        exit 0
     fi
 
     # -------------------------------------------------------------------------
