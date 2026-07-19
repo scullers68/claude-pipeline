@@ -714,3 +714,135 @@ _load_deploy_verify_fn() {
 	run --separate-stderr should_run_deploy_verify "99"
 	[ "$status" -eq 1 ]
 }
+
+# ===========================================================================
+# (max_turns) error_kind=max_turns_exhausted → retry_same, not escalate  (#14)
+# "Needs more turns" is not "failed". A max_turns exhaustion below the model
+# ceiling must give the SAME model another attempt (with the raised turn cap),
+# NOT escalate to a pricier tier and cold-restart. It must not be classified as
+# a failure (bail), so it never decrements the per-task retry budget or triggers
+# a from-scratch full-batch re-run. Bounded: after one same-model retry it falls
+# through to escalate so a genuinely oversized task still progresses.
+# ===========================================================================
+
+_stage_result_max_turns() {
+	printf '%s' \
+		'{"status":"error","output":null,"raw":"",' \
+		'"denials":[],"model":"sonnet",' \
+		'"error_kind":"max_turns_exhausted","elapsed_ms":100}'
+}
+
+_stage_result_max_turns_at_ceiling() {
+	printf '%s' \
+		'{"status":"error","output":null,"raw":"",' \
+		'"denials":[],"model":"opus",' \
+		'"error_kind":"max_turns_exhausted_at_ceiling","elapsed_ms":100}'
+}
+
+# History with one prior same-model (sonnet) attempt.
+_history_one_sonnet() {
+	printf '%s' '[{"from_model":"sonnet","to_model":"opus"}]'
+}
+
+@test "(M1) max_turns_exhausted → retry_same, not escalate (bash backend)" {
+	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
+		|| fail "decide-action.sh not present or not executable"
+
+	ESCALATION_POLICY_BACKEND=bash run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$(_stage_result_max_turns)" "$(_history_empty)"
+
+	[ "$status" -eq 0 ]
+	local action
+	action=$(printf '%s' "$output" | jq -r '.action')
+	[[ "$action" == "retry_same" ]] || {
+		printf 'FAIL: expected retry_same, got: %s\nStdout: %s\n' "$action" "$output" >&2
+		return 1
+	}
+}
+
+@test "(M2) max_turns_exhausted → retry_same before any skill call (compose backend)" {
+	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
+		|| fail "decide-action.sh not present or not executable"
+
+	# Tripwire: the max_turns short-circuit must fire before delegating to
+	# decide-retry.sh, so the mock claude must never run.
+	install_mock_claude
+	set_mock_claude_output 'TRIPWIRE-SKILL-WAS-INVOKED'
+	set_mock_claude_exit 1
+
+	run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$(_stage_result_max_turns)" "$(_history_empty)"
+
+	[ "$status" -eq 0 ]
+	local action
+	action=$(printf '%s' "$output" | jq -r '.action')
+	[[ "$action" == "retry_same" ]] || {
+		printf 'FAIL: expected retry_same, got: %s\nStdout: %s\n' "$action" "$output" >&2
+		return 1
+	}
+	[[ "$output" != *"TRIPWIRE"* ]] || fail "skill was invoked; short-circuit did not fire"
+}
+
+@test "(M3) max_turns_exhausted after a same-model retry → escalate (bounded)" {
+	ESCALATION_POLICY_BACKEND=bash run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$(_stage_result_max_turns)" "$(_history_one_sonnet)"
+
+	[ "$status" -eq 0 ]
+	local action
+	action=$(printf '%s' "$output" | jq -r '.action')
+	[[ "$action" == "escalate" ]] || {
+		printf 'FAIL: expected escalate after prior retry, got: %s\nStdout: %s\n' "$action" "$output" >&2
+		return 1
+	}
+}
+
+@test "(M4) max_turns_exhausted_at_ceiling → bail (regression guard)" {
+	ESCALATION_POLICY_BACKEND=bash run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$(_stage_result_max_turns_at_ceiling)" "$(_history_empty)"
+
+	[ "$status" -eq 0 ]
+	local action
+	action=$(printf '%s' "$output" | jq -r '.action')
+	[[ "$action" == "bail" ]] || {
+		printf 'FAIL: expected bail at ceiling, got: %s\nStdout: %s\n' "$action" "$output" >&2
+		return 1
+	}
+}
+
+@test "(M5) max_turns_exhausted is never classified as a failure (no bail, budget-safe)" {
+	# AC5: a max_turns envelope must not decrement the retry budget as a failure.
+	# 'bail' is the only action that marks the task failed (set_stage_failed);
+	# retry_same/escalate do not. Assert the first max_turns is retry_same (not bail).
+	ESCALATION_POLICY_BACKEND=bash run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$(_stage_result_max_turns)" "$(_history_empty)"
+
+	[ "$status" -eq 0 ]
+	local action
+	action=$(printf '%s' "$output" | jq -r '.action')
+	[[ "$action" != "bail" ]] || fail "max_turns must not bail (would mark task failed / burn budget)"
+	[[ "$action" == "retry_same" ]] || {
+		printf 'FAIL: expected retry_same, got: %s\n' "$action" >&2
+		return 1
+	}
+}
+
+@test "(M6) implement turn cap is env-configurable with a raised default (#14 AC2)" {
+	# The (S) implement cap was hardcoded at 25 — too low: a real (S) 2-file task
+	# needed 59 turns, guaranteeing max_turns churn. It must now be env-overridable
+	# (MAX_TURNS_IMPLEMENT) with a default well clear of observed need.
+	grep -q 'MAX_TURNS_IMPLEMENT:-' "$ORCHESTRATOR_SCRIPT" \
+		|| fail "MAX_TURNS_IMPLEMENT env override missing from orchestrator"
+	grep -q 'MAX_TURNS_IMPLEMENT_ML:-' "$ORCHESTRATOR_SCRIPT" \
+		|| fail "MAX_TURNS_IMPLEMENT_ML env override missing from orchestrator"
+
+	local _default
+	_default=$(grep -oE 'MAX_TURNS_IMPLEMENT:-[0-9]+' "$ORCHESTRATOR_SCRIPT" \
+		| head -1 | grep -oE '[0-9]+$')
+	[[ -n "$_default" ]] || fail "could not read MAX_TURNS_IMPLEMENT default"
+	(( _default >= 50 )) \
+		|| fail "MAX_TURNS_IMPLEMENT default $_default too low (was 25; must clear observed 59-turn tasks)"
+
+	# The old hardcoded 25 must be gone.
+	! grep -qE '\-\-max-turns 25' "$ORCHESTRATOR_SCRIPT" \
+		|| fail "hardcoded '--max-turns 25' implement cap still present"
+}

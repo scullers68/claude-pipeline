@@ -1167,7 +1167,7 @@ EOF
 # COMPLEXITY-AWARE MAX-TURNS LOGIC
 # =============================================================================
 
-@test "run_stage passes --max-turns 40 to sonnet with M-complexity" {
+@test "run_stage passes --max-turns 80 to sonnet with M-complexity" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
@@ -1180,11 +1180,12 @@ EOF
     run_stage "implement-task-1" "prompt" "test-schema.json" "" "M"
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--max-turns 40" "$claude_calls" || \
-        fail "Expected --max-turns 40 for sonnet with M-complexity. Calls: $(cat "$claude_calls")"
+    # issue #14: M/L implement cap raised 40 -> 80 (env: MAX_TURNS_IMPLEMENT_ML)
+    grep -q -- "--max-turns 80" "$claude_calls" || \
+        fail "Expected --max-turns 80 for sonnet with M-complexity. Calls: $(cat "$claude_calls")"
 }
 
-@test "run_stage passes --max-turns 40 to sonnet with L-complexity" {
+@test "run_stage passes --max-turns 80 to sonnet with L-complexity" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
@@ -1198,11 +1199,12 @@ EOF
     run_stage "implement-task-1" "prompt" "test-schema.json" "" "L" "" "sonnet"
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--max-turns 40" "$claude_calls" || \
-        fail "Expected --max-turns 40 for sonnet with L-complexity. Calls: $(cat "$claude_calls")"
+    # issue #14: M/L implement cap raised 40 -> 80 (env: MAX_TURNS_IMPLEMENT_ML)
+    grep -q -- "--max-turns 80" "$claude_calls" || \
+        fail "Expected --max-turns 80 for sonnet with L-complexity. Calls: $(cat "$claude_calls")"
 }
 
-@test "run_stage passes --max-turns 25 to sonnet with S-complexity" {
+@test "run_stage passes --max-turns 60 to sonnet with S-complexity" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
@@ -1216,11 +1218,12 @@ EOF
     run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--max-turns 25" "$claude_calls" || \
-        fail "Expected --max-turns 25 for sonnet with S-complexity. Calls: $(cat "$claude_calls")"
+    # issue #14: S/empty implement cap raised 25 -> 60 (env: MAX_TURNS_IMPLEMENT)
+    grep -q -- "--max-turns 60" "$claude_calls" || \
+        fail "Expected --max-turns 60 for sonnet with S-complexity. Calls: $(cat "$claude_calls")"
 }
 
-@test "run_stage passes --max-turns 25 to sonnet with empty complexity" {
+@test "run_stage passes --max-turns 60 to sonnet with empty complexity" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
@@ -1234,8 +1237,9 @@ EOF
     run_stage "review-task-1-iter-1" "prompt" "test-schema.json" "" ""
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--max-turns 25" "$claude_calls" || \
-        fail "Expected --max-turns 25 for sonnet with empty complexity. Calls: $(cat "$claude_calls")"
+    # issue #14: S/empty sonnet cap raised 25 -> 60 (env: MAX_TURNS_IMPLEMENT)
+    grep -q -- "--max-turns 60" "$claude_calls" || \
+        fail "Expected --max-turns 60 for sonnet with empty complexity. Calls: $(cat "$claude_calls")"
 }
 
 @test "run_stage passes --max-turns 10 to haiku for light-tier stage" {
