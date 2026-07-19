@@ -85,7 +85,7 @@ _write_status_with_timestamps() {
     export_metrics
     local v
     v=$(jq -r '.schema_version' "$LOG_BASE/metrics.json")
-    [ "$v" = "1" ]
+    [ "$v" = "2" ]
 }
 
 @test "metrics.json contains issue field" {
@@ -316,4 +316,76 @@ _write_status_with_timestamps() {
     local v
     v=$(jq -r '.completed_at' "$LOG_BASE/metrics.json")
     [ "$v" = "2024-01-01T10:01:01Z" ]
+}
+
+# =============================================================================
+# TOKEN/COST USAGE ACCOUNTING (#15)
+# metrics.json must carry per-stage and run-total token/cost usage, summed
+# across ALL attempts (including discarded error_max_turns retries), parsed
+# from the claude -p result envelopes in $LOG_BASE/stages/*.log. Discarded
+# (churn) spend must be distinguishable from kept spend.
+# =============================================================================
+
+# Write two fixture stage logs with claude-result envelopes (plus noise lines
+# the parser must skip). Totals across all attempts:
+#   parse_issue (kept):        weighted 60, raw 160, cost 1.0, turns 5
+#   implement-task-1 discarded: weighted 20, raw 70,  cost 2.0, turns 3
+#   implement-task-1 kept:      weighted 60, raw 260, cost 3.0, turns 9
+#   RUN TOTAL: weighted 140, raw 490, cost 6.0, turns 17
+#   DISCARDED: weighted 20, cost 2.0
+_write_stage_logs_with_usage() {
+    local d="$LOG_BASE/stages"
+    mkdir -p "$d"
+    {
+        printf '=== parse_issue output ===\n'
+        printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":5,"total_cost_usd":1.0,"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":100,"output_tokens":30}}'
+        printf '=== exit code: 0 ===\n'
+    } > "$d/01-parse_issue.log"
+    {
+        printf '=== implement-task-1 output ===\n'
+        printf '%s\n' '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":3,"total_cost_usd":2.0,"usage":{"input_tokens":5,"cache_creation_input_tokens":5,"cache_read_input_tokens":50,"output_tokens":10}}'
+        printf '=== implement-task-1 escalation ===\n'
+        printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":9,"total_cost_usd":3.0,"usage":{"input_tokens":8,"cache_creation_input_tokens":12,"cache_read_input_tokens":200,"output_tokens":40}}'
+        printf '=== exit code: 0 ===\n'
+    } > "$d/02-implement-task-1.log"
+}
+
+@test "usage.run_total sums weighted/raw/cost/turns across all attempts (#15)" {
+    _write_status_with_timestamps
+    _write_stage_logs_with_usage
+    export_metrics
+    local m="$LOG_BASE/metrics.json"
+    [ "$(jq -r '.usage.run_total.weighted_tokens' "$m")" = "140" ] || fail "weighted: $(jq -r '.usage.run_total.weighted_tokens' "$m")"
+    [ "$(jq -r '.usage.run_total.raw_tokens' "$m")" = "490" ] || fail "raw: $(jq -r '.usage.run_total.raw_tokens' "$m")"
+    [ "$(jq -r '.usage.run_total.total_cost_usd' "$m")" = "6" ] || fail "cost: $(jq -r '.usage.run_total.total_cost_usd' "$m")"
+    [ "$(jq -r '.usage.run_total.num_turns' "$m")" = "17" ] || fail "turns: $(jq -r '.usage.run_total.num_turns' "$m")"
+}
+
+@test "usage.run_total distinguishes discarded (error_max_turns) spend (#15)" {
+    _write_status_with_timestamps
+    _write_stage_logs_with_usage
+    export_metrics
+    local m="$LOG_BASE/metrics.json"
+    [ "$(jq -r '.usage.run_total.discarded_weighted_tokens' "$m")" = "20" ] || fail "disc weighted: $(jq -r '.usage.run_total.discarded_weighted_tokens' "$m")"
+    [ "$(jq -r '.usage.run_total.discarded_cost_usd' "$m")" = "2" ] || fail "disc cost: $(jq -r '.usage.run_total.discarded_cost_usd' "$m")"
+}
+
+@test "usage.by_stage carries per-stage totals summed across attempts (#15)" {
+    _write_status_with_timestamps
+    _write_stage_logs_with_usage
+    export_metrics
+    local m="$LOG_BASE/metrics.json"
+    [ "$(jq -r '.usage.by_stage["parse_issue"].weighted_tokens' "$m")" = "60" ] || fail "parse: $(jq -r '.usage.by_stage["parse_issue"]' "$m")"
+    [ "$(jq -r '.usage.by_stage["implement-task-1"].weighted_tokens' "$m")" = "80" ] || fail "impl: $(jq -r '.usage.by_stage["implement-task-1"]' "$m")"
+    [ "$(jq -r '.usage.by_stage["implement-task-1"].discarded_weighted_tokens' "$m")" = "20" ]
+}
+
+@test "usage.run_total is zero (not null) when no stage logs exist (#15)" {
+    _write_status_with_timestamps
+    export_metrics
+    local m="$LOG_BASE/metrics.json"
+    [ "$(jq -r '.usage.run_total.weighted_tokens' "$m")" = "0" ] || fail "weighted: $(jq -r '.usage.run_total.weighted_tokens' "$m")"
+    [ "$(jq -r '.usage.run_total.total_cost_usd' "$m")" = "0" ]
+    # by_stage present as an (empty) object, valid JSON
+    jq -e '.usage.by_stage | type == "object"' "$m" >/dev/null || fail "by_stage not an object"
 }

@@ -967,7 +967,7 @@ write_task_summary_to_status() {
 #
 # Schema:
 # {
-#   "schema_version": "1",          -- bump when fields are added/removed
+#   "schema_version": "2",          -- bump when fields are added/removed
 #   "issue":          string,        -- issue number or key
 #   "base_branch":    string,
 #   "branch":         string,        -- feature branch used
@@ -989,10 +989,80 @@ write_task_summary_to_status() {
 #     "test_iterations":       number,
 #     "pr_review_iterations":  number
 #   },
+#   "usage": {                       -- token/cost, parsed from stage logs (#15)
+#     "run_total": { "weighted_tokens": number, "raw_tokens": number,
+#                    "total_cost_usd": number, "num_turns": number,
+#                    "discarded_weighted_tokens": number, "discarded_cost_usd": number },
+#     "by_stage":  { "<stage>": { ...same fields... }, ... }
+#   },
 #   "escalations": [
 #     { "stage": string, "from_model": string, "to_model": string, "reason": string }, ...
 #   ]
 # }
+
+# _collect_stage_usage <stages_dir> — aggregate token/cost usage from the
+# claude -p result envelopes in <stages_dir>/*.log (issue #15).
+#
+# Every result envelope (one JSON object per line carrying "total_cost_usd")
+# is counted, so ALL attempts — including discarded error_max_turns retries —
+# are summed. "Discarded" = envelopes whose subtype is "error_max_turns".
+# weighted = input + cache_creation + output (the cap-impact proxy); raw adds
+# cache_read. Emits, with every field 0 (never null) when no logs exist:
+#   {"run_total":{weighted_tokens,raw_tokens,total_cost_usd,num_turns,
+#                 discarded_weighted_tokens,discarded_cost_usd},
+#    "by_stage":{"<stage>":{...same fields...}, ...}}
+_collect_stage_usage() {
+    local dir="$1"
+    local -a per_stage=()
+    local _empty='{"run_total":{"weighted_tokens":0,"raw_tokens":0,"total_cost_usd":0,"num_turns":0,"discarded_weighted_tokens":0,"discarded_cost_usd":0},"by_stage":{}}'
+
+    if [[ -d "$dir" ]]; then
+        local f stage obj
+        for f in "$dir"/*.log; do
+            [[ -f "$f" ]] || continue
+            grep -q '"total_cost_usd"' "$f" 2>/dev/null || continue
+            # Strip the ordering prefix (NN-) and .log to recover the stage name.
+            stage=$(basename "$f" .log | sed -E 's/^[0-9]+-//')
+            # Pre-filter to result-envelope lines so non-JSON log noise never
+            # reaches jq; sum this stage's envelopes across all attempts.
+            obj=$(grep -E '^\{.*"total_cost_usd"' "$f" 2>/dev/null | jq -s --arg stage "$stage" '
+                def wt: (.usage.input_tokens // 0)
+                      + (.usage.cache_creation_input_tokens // 0)
+                      + (.usage.output_tokens // 0);
+                def rw: wt + (.usage.cache_read_input_tokens // 0);
+                def disc: (.subtype == "error_max_turns");
+                {
+                    stage: $stage,
+                    weighted_tokens:           (map(wt) | add // 0),
+                    raw_tokens:                (map(rw) | add // 0),
+                    total_cost_usd:            (map(.total_cost_usd // 0) | add // 0),
+                    num_turns:                 (map(.num_turns // 0) | add // 0),
+                    discarded_weighted_tokens: ([.[] | select(disc) | wt] | add // 0),
+                    discarded_cost_usd:        ([.[] | select(disc) | .total_cost_usd // 0] | add // 0)
+                }' 2>/dev/null)
+            [[ -n "$obj" ]] && per_stage+=("$obj")
+        done
+    fi
+
+    if (( ${#per_stage[@]} == 0 )); then
+        printf '%s' "$_empty"
+        return 0
+    fi
+
+    printf '%s\n' "${per_stage[@]}" | jq -s '
+        {
+            by_stage: (map({key: .stage, value: (del(.stage))}) | from_entries),
+            run_total: {
+                weighted_tokens:           (map(.weighted_tokens) | add // 0),
+                raw_tokens:                (map(.raw_tokens) | add // 0),
+                total_cost_usd:            (map(.total_cost_usd) | add // 0),
+                num_turns:                 (map(.num_turns) | add // 0),
+                discarded_weighted_tokens: (map(.discarded_weighted_tokens) | add // 0),
+                discarded_cost_usd:        (map(.discarded_cost_usd) | add // 0)
+            }
+        }' 2>/dev/null || printf '%s' "$_empty"
+}
+
 export_metrics() {
     local metrics_file="$LOG_BASE/metrics.json"
 
@@ -1001,7 +1071,11 @@ export_metrics() {
         return 0
     fi
 
-    jq --arg schema_version "1" '
+    # Token/cost usage (issue #15) — parsed from the stage logs, not status.json.
+    local usage_json
+    usage_json=$(_collect_stage_usage "$LOG_BASE/stages")
+
+    jq --arg schema_version "2" --argjson usage "$usage_json" '
         # Helper: parse ISO8601 to epoch seconds via @sh/strptime is not portable;
         # use todate/fromdate round-trip available in jq >= 1.6.
         def iso_to_epoch:
@@ -1050,6 +1124,7 @@ export_metrics() {
                 test_iterations:      ($status.test_iterations // 0),
                 pr_review_iterations: ($status.pr_review_iterations // 0)
             },
+            usage:       $usage,
             escalations: ($status.escalations // [])
         }
     ' "$STATUS_FILE" > "$metrics_file" 2>/dev/null
