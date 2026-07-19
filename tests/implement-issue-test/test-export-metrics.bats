@@ -389,3 +389,43 @@ _write_stage_logs_with_usage() {
     # by_stage present as an (empty) object, valid JSON
     jq -e '.usage.by_stage | type == "object"' "$m" >/dev/null || fail "by_stage not an object"
 }
+
+# =============================================================================
+# NO-OP WASTE ACCOUNTING (#29)
+# A stage that reports success but is failed by the silent-no-op guard (no
+# commits) burned tokens for nothing. It must count as no_op — non-productive,
+# distinct from the error_max_turns "discarded" bucket and NOT counted as kept.
+# =============================================================================
+
+# A stage log with a success envelope (60 weighted, $1.0) AND the guard's no_op
+# marker — the shape the silent-no-op guard leaves behind.
+_write_noop_stage_log() {
+    local d="$LOG_BASE/stages"
+    mkdir -p "$d"
+    {
+        printf '=== implement-task-2 output ===\n'
+        printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":55,"total_cost_usd":1.0,"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":100,"output_tokens":30}}'
+        printf '=== no_op: reported success, no commits (guard-failed, #29) ===\n'
+    } > "$d/02-implement-task-2.log"
+}
+
+@test "usage.run_total attributes a guard-failed no-op stage to no_op, not kept (#29)" {
+    _write_status_with_timestamps
+    _write_noop_stage_log
+    export_metrics
+    local m="$LOG_BASE/metrics.json"
+    [ "$(jq -r '.usage.run_total.no_op_weighted_tokens' "$m")" = "60" ] || fail "no_op weighted: $(jq -r '.usage.run_total.no_op_weighted_tokens' "$m")"
+    jq -e '.usage.run_total.no_op_cost_usd == 1' "$m" >/dev/null || fail "no_op cost: $(jq -r '.usage.run_total.no_op_cost_usd' "$m")"
+    # NOT counted as error_max_turns churn
+    [ "$(jq -r '.usage.run_total.discarded_weighted_tokens' "$m")" = "0" ]
+    # by_stage carries it too
+    [ "$(jq -r '.usage.by_stage["implement-task-2"].no_op_weighted_tokens' "$m")" = "60" ]
+}
+
+@test "usage no_op is zero for a normal (unmarked) success stage (#29)" {
+    _write_status_with_timestamps
+    _write_stage_logs_with_usage   # from the #15 tests: kept + discarded, no no_op marker
+    export_metrics
+    local m="$LOG_BASE/metrics.json"
+    [ "$(jq -r '.usage.run_total.no_op_weighted_tokens' "$m")" = "0" ] || fail "unmarked stages must have no_op=0, got $(jq -r '.usage.run_total.no_op_weighted_tokens' "$m")"
+}

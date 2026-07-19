@@ -1084,7 +1084,8 @@ write_task_summary_to_status() {
 #   "usage": {                       -- token/cost, parsed from stage logs (#15)
 #     "run_total": { "weighted_tokens": number, "raw_tokens": number,
 #                    "total_cost_usd": number, "num_turns": number,
-#                    "discarded_weighted_tokens": number, "discarded_cost_usd": number },
+#                    "discarded_weighted_tokens": number, "discarded_cost_usd": number,
+#                    "no_op_weighted_tokens": number, "no_op_cost_usd": number },
 #     "by_stage":  { "<stage>": { ...same fields... }, ... }
 #   },
 #   "escalations": [
@@ -1098,15 +1099,18 @@ write_task_summary_to_status() {
 # Every result envelope (one JSON object per line carrying "total_cost_usd")
 # is counted, so ALL attempts — including discarded error_max_turns retries —
 # are summed. "Discarded" = envelopes whose subtype is "error_max_turns".
+# "no_op" = the non-error spend of a stage the silent-no-op guard failed for
+# producing no commits (issue #29) — wasted, distinct from discarded churn.
 # weighted = input + cache_creation + output (the cap-impact proxy); raw adds
 # cache_read. Emits, with every field 0 (never null) when no logs exist:
 #   {"run_total":{weighted_tokens,raw_tokens,total_cost_usd,num_turns,
-#                 discarded_weighted_tokens,discarded_cost_usd},
+#                 discarded_weighted_tokens,discarded_cost_usd,
+#                 no_op_weighted_tokens,no_op_cost_usd},
 #    "by_stage":{"<stage>":{...same fields...}, ...}}
 _collect_stage_usage() {
     local dir="$1"
     local -a per_stage=()
-    local _empty='{"run_total":{"weighted_tokens":0,"raw_tokens":0,"total_cost_usd":0,"num_turns":0,"discarded_weighted_tokens":0,"discarded_cost_usd":0},"by_stage":{}}'
+    local _empty='{"run_total":{"weighted_tokens":0,"raw_tokens":0,"total_cost_usd":0,"num_turns":0,"discarded_weighted_tokens":0,"discarded_cost_usd":0,"no_op_weighted_tokens":0,"no_op_cost_usd":0},"by_stage":{}}'
 
     if [[ -d "$dir" ]]; then
         local f stage obj
@@ -1115,22 +1119,30 @@ _collect_stage_usage() {
             grep -q '"total_cost_usd"' "$f" 2>/dev/null || continue
             # Strip the ordering prefix (NN-) and .log to recover the stage name.
             stage=$(basename "$f" .log | sed -E 's/^[0-9]+-//')
+            # A stage marked by the silent-no-op guard (issue #29) reported
+            # success but landed no commits — its non-error spend is wasted, not
+            # kept. Flag it so jq attributes it to the no_op bucket (distinct
+            # from error_max_turns churn in the discarded bucket).
+            local _noop=false
+            grep -q '^=== no_op:' "$f" 2>/dev/null && _noop=true
             # Pre-filter to result-envelope lines so non-JSON log noise never
             # reaches jq; sum this stage's envelopes across all attempts.
-            obj=$(grep -E '^\{.*"total_cost_usd"' "$f" 2>/dev/null | jq -s --arg stage "$stage" '
+            obj=$(grep -E '^\{.*"total_cost_usd"' "$f" 2>/dev/null | jq -s --arg stage "$stage" --argjson noop "$_noop" '
                 def wt: (.usage.input_tokens // 0)
                       + (.usage.cache_creation_input_tokens // 0)
                       + (.usage.output_tokens // 0);
                 def rw: wt + (.usage.cache_read_input_tokens // 0);
-                def disc: (.subtype == "error_max_turns");
+                def is_max: (.subtype == "error_max_turns");
                 {
                     stage: $stage,
                     weighted_tokens:           (map(wt) | add // 0),
                     raw_tokens:                (map(rw) | add // 0),
                     total_cost_usd:            (map(.total_cost_usd // 0) | add // 0),
                     num_turns:                 (map(.num_turns // 0) | add // 0),
-                    discarded_weighted_tokens: ([.[] | select(disc) | wt] | add // 0),
-                    discarded_cost_usd:        ([.[] | select(disc) | .total_cost_usd // 0] | add // 0)
+                    discarded_weighted_tokens: ([.[] | select(is_max) | wt] | add // 0),
+                    discarded_cost_usd:        ([.[] | select(is_max) | .total_cost_usd // 0] | add // 0),
+                    no_op_weighted_tokens:     (if $noop then ([.[] | select(is_max | not) | wt] | add // 0) else 0 end),
+                    no_op_cost_usd:            (if $noop then ([.[] | select(is_max | not) | .total_cost_usd // 0] | add // 0) else 0 end)
                 }' 2>/dev/null)
             [[ -n "$obj" ]] && per_stage+=("$obj")
         done
@@ -1150,7 +1162,9 @@ _collect_stage_usage() {
                 total_cost_usd:            (map(.total_cost_usd) | add // 0),
                 num_turns:                 (map(.num_turns) | add // 0),
                 discarded_weighted_tokens: (map(.discarded_weighted_tokens) | add // 0),
-                discarded_cost_usd:        (map(.discarded_cost_usd) | add // 0)
+                discarded_cost_usd:        (map(.discarded_cost_usd) | add // 0),
+                no_op_weighted_tokens:     (map(.no_op_weighted_tokens) | add // 0),
+                no_op_cost_usd:            (map(.no_op_cost_usd) | add // 0)
             }
         }' 2>/dev/null || printf '%s' "$_empty"
 }
@@ -5001,6 +5015,15 @@ execute_batch_parallel() {
 		if [[ -z "$(git rev-list "${feature_branch}..${wb}" 2>/dev/null)" ]]; then
 			log_error "Task $tid reported success but produced no commits" \
 				"— marking failed (silent no-op guard)"
+			# Mark this task's stage log so metrics (issue #29) attribute its
+			# spend to the no_op bucket — the subagent burned tokens but landed
+			# nothing. The NN- prefix is unknown here, so glob by task id.
+			local _noop_marklog
+			for _noop_marklog in "$LOG_BASE"/stages/*-implement-task-"${tid}".log; do
+				[[ -f "$_noop_marklog" ]] \
+					&& printf '=== no_op: reported success, no commits (guard-failed, #29) ===\n' \
+						>> "$_noop_marklog"
+			done
 			failed+=("$tid")
 			cleanup_worktree "$wp" "$wb"
 			continue
