@@ -26,6 +26,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="${SCHEMA_DIR:-$SCRIPT_DIR/schemas}"
 
+# Safe git-stash helpers (issue #17): stash operations must be scoped to the
+# exact stash we create, never a bare pop that could grab a stranger's stash.
+# shellcheck source=git-safety.sh
+source "$SCRIPT_DIR/git-safety.sh"
+
 # Config resolution: explicit project first, script-relative second (test
 # sandboxes / legacy copied trees), cwd-project last.
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/.claude/config/platform.sh" ]; then
@@ -207,25 +212,26 @@ pr_number=""
 # leftover scratch from a prior crash — bail so the operator can
 # investigate.
 
-_stash_pushed=0
+_stash_ref=""
 if [[ -n "$(git status --porcelain 2>/dev/null || true)" ]]; then
     if is_stage_completed fast_path_implement; then
         bail "dirty_tree"
     fi
     log "Dirty working tree on fresh start — auto-stashing"
-    if ! git stash push --include-untracked \
-            -m "fast-path auto-stash #${ISSUE_NUMBER}" 2>>"$LOG_FILE"; then
+    # Ref-scoped stash (issue #17): capture the created stash's SHA so we pop
+    # OUR stash after checkout, never a concurrent run's or the user's stash
+    # that may land on top in the meantime.
+    if ! _stash_ref=$(safe_stash_push "fast-path auto-stash #${ISSUE_NUMBER}"); then
         bail "dirty_tree"
     fi
-    _stash_pushed=1
 fi
 
 # --- 2. Branch setup -------------------------------------------------------
 
 git checkout "$BRANCH" 2>>"$LOG_FILE" || bail "branch_checkout_failed"
 
-if [[ "${_stash_pushed}" == "1" ]]; then
-    if ! git stash pop 2>>"$LOG_FILE"; then
+if [[ -n "${_stash_ref}" ]]; then
+    if ! safe_stash_pop "$_stash_ref"; then
         bail "stash_pop_conflict"
     fi
 fi

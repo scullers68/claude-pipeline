@@ -216,3 +216,63 @@ _count_invocations() {
     done <<< "$(grep -n '^ *verify_on_feature_branch .* || true' "$src")"
     [ "$found" = true ]
 }
+
+# =============================================================================
+# GIT SAFETY — safe_stash_pop never pops a foreign stash (issue #17)
+# The pipeline's fast path stashes a dirty tree, checks out the branch, then
+# pops. A bare `git stash pop` pops whatever is on TOP — which may be a
+# concurrent run's or the user's stash. safe_stash_pop pops ONLY the stash
+# matching the SHA we created, never a stranger's. Tested against a real repo.
+# =============================================================================
+
+_git_safety_lib() {
+    printf '%s' "$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)/plugins/pipeline-core/scripts/git-safety.sh"
+}
+
+@test "(GS1) safe_stash_pop restores our stash when it is the only one (#17)" {
+    source "$(_git_safety_lib)"
+    echo "ours" > work.txt
+    local sha; sha=$(safe_stash_push "ours-#123")
+    [ -n "$sha" ] || fail "safe_stash_push returned no sha"
+    [ ! -f work.txt ] || fail "change was not stashed away"
+
+    safe_stash_pop "$sha"
+    [ -f work.txt ] || fail "our change was not restored"
+    [ "$(git stash list | wc -l | tr -d ' ')" = "0" ]
+}
+
+@test "(GS2) safe_stash_pop pops OURS, leaves a foreign stash on top intact (#17)" {
+    source "$(_git_safety_lib)"
+    echo "ours" > ours.txt
+    local sha; sha=$(safe_stash_push "ours-#123")
+
+    # A foreign stash lands on top (concurrent run / user) — becomes stash@{0}.
+    echo "foreign" > foreign.txt
+    git stash push --include-untracked -m "FOREIGN-DO-NOT-TOUCH" >/dev/null 2>&1
+
+    safe_stash_pop "$sha"
+    [ -f ours.txt ]   || fail "our change was not restored"
+    [ ! -f foreign.txt ] || fail "foreign stash was popped — data-loss bug"
+    [ "$(git stash list | wc -l | tr -d ' ')" = "1" ] || fail "foreign stash count changed"
+    git stash list | grep -q FOREIGN-DO-NOT-TOUCH || fail "foreign stash disturbed"
+}
+
+@test "(GS3) safe_stash_pop refuses (rc=1) when our stash is absent — never pops a stranger's (#17)" {
+    source "$(_git_safety_lib)"
+    echo "foreign" > foreign.txt
+    git stash push --include-untracked -m "FOREIGN-DO-NOT-TOUCH" >/dev/null 2>&1
+
+    run safe_stash_pop "0000000000000000000000000000000000000000"
+    [ "$status" -eq 1 ] || fail "expected rc=1 (our stash gone), got $status"
+    # The foreign stash must be untouched.
+    [ "$(git stash list | wc -l | tr -d ' ')" = "1" ] || fail "a foreign stash was popped"
+}
+
+@test "(GS4) no 'git stash pop' outside git-safety.sh (#17 lint)" {
+    local root; root="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
+    local hits
+    hits=$(grep -rn 'git stash pop' "$root/plugins" --include='*.sh' \
+        | grep -v 'git-safety.sh' || true)
+    [ -z "$hits" ] || fail "bare 'git stash pop' outside git-safety.sh:
+$hits"
+}
